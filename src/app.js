@@ -1,9 +1,21 @@
+import { db } from './firebase.js'
+import { 
+  collection, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  query, 
+  orderBy, 
+  onSnapshot 
+} from 'firebase/firestore'
+
 export class ThoughtCollector {
   constructor(inputEl, buttonEl, listEl) {
     this.input = inputEl
     this.button = buttonEl
     this.list = listEl
-    this.thoughts = this.loadThoughts()
+    this.thoughts = []
+    this.thoughtsRef = collection(db, 'thoughts')
     
     this.button.addEventListener('click', () => this.saveThought())
     this.input.addEventListener('keydown', (e) => {
@@ -12,42 +24,55 @@ export class ThoughtCollector {
       }
     })
     
-    this.render()
+    this.subscribe()
   }
   
-  loadThoughts() {
-    const saved = localStorage.getItem('thoughts')
-    return saved ? JSON.parse(saved) : []
+  subscribe() {
+    const q = query(this.thoughtsRef, orderBy('timestamp', 'desc'))
+    
+    onSnapshot(q, (snapshot) => {
+      this.thoughts = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }))
+      this.render()
+    }, (error) => {
+      console.error('Error fetching thoughts:', error)
+      this.list.innerHTML = `<p class="error-state">Could not load thoughts. Check your connection.</p>`
+    })
   }
   
-  persistThoughts() {
-    localStorage.setItem('thoughts', JSON.stringify(this.thoughts))
-  }
-  
-  saveThought() {
+  async saveThought() {
     const text = this.input.value.trim()
     if (!text) return
     
-    const thought = {
-      id: Date.now(),
-      text: text,
-      timestamp: new Date().toISOString()
-    }
+    this.button.disabled = true
     
-    this.thoughts.unshift(thought)
-    this.persistThoughts()
-    this.input.value = ''
-    this.render()
+    try {
+      await addDoc(this.thoughtsRef, {
+        text: text,
+        timestamp: Date.now()
+      })
+      this.input.value = ''
+    } catch (error) {
+      console.error('Error saving thought:', error)
+      alert('Could not save thought. Please try again.')
+    } finally {
+      this.button.disabled = false
+    }
   }
   
-  deleteThought(id) {
-    this.thoughts = this.thoughts.filter(t => t.id !== id)
-    this.persistThoughts()
-    this.render()
+  async deleteThought(id) {
+    try {
+      await deleteDoc(doc(db, 'thoughts', id))
+    } catch (error) {
+      console.error('Error deleting thought:', error)
+      alert('Could not delete thought. Please try again.')
+    }
   }
   
-  formatDate(isoString) {
-    const date = new Date(isoString)
+  formatDate(timestamp) {
+    const date = new Date(timestamp)
     const now = new Date()
     const diffMs = now - date
     const diffMins = Math.floor(diffMs / 60000)
@@ -84,10 +109,9 @@ export class ThoughtCollector {
       </div>
     `).join('')
     
-    // Add delete handlers
     this.list.querySelectorAll('.delete-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        const id = parseInt(e.target.dataset.id)
+        const id = e.target.dataset.id
         this.deleteThought(id)
       })
     })
