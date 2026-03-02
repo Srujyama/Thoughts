@@ -1,27 +1,33 @@
 import './style.css'
+import { AuthController } from './auth.js'
 import { ThoughtCollector } from './app.js'
+import { storage, authAPI } from './api.js'
 
-document.querySelector('#app').innerHTML = `
-  <div class="container">
-    <h1>thoughts</h1>
-    
-    <div class="input-area">
-      <textarea 
-        id="thought-input" 
-        placeholder="What's on your mind?"
-        rows="3"
-      ></textarea>
-      <button id="save-btn" type="button">Save thought</button>
-    </div>
-    
-    <div class="thoughts-list" id="thoughts-list">
-      <!-- Thoughts will appear here -->
-    </div>
-  </div>
-`
+const appEl = document.querySelector('#app')
 
-const collector = new ThoughtCollector(
-  document.querySelector('#thought-input'),
-  document.querySelector('#save-btn'),
-  document.querySelector('#thoughts-list')
-)
+function showAuthView() {
+    const auth = new AuthController(appEl, () => {
+        showAppView()
+    })
+    auth.render()
+}
+
+function showAppView() {
+    new ThoughtCollector(appEl, async () => {
+        await authAPI.logout()
+        showAuthView()
+    })
+}
+
+function init() {
+    const token = storage.getToken()
+    const user = storage.getUser()
+
+    if (token && user) {
+        showAppView()
+    } else {
+        showAuthView()
+    }
+}
+
+init()
