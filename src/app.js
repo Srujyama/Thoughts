@@ -128,11 +128,11 @@ export class ThoughtCollector {
         })
     }
 
-    _promptNewFolder() {
+    async _promptNewFolder() {
         const name = prompt('Folder name:')
         if (!name || !name.trim()) return
         try {
-            foldersAPI.create(name)
+            await foldersAPI.create(name)
             this._render()
         } catch (err) {
             this._toast(`> ERROR: ${err.message}`)
