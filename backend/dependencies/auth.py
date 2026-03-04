@@ -5,18 +5,30 @@ import os
 
 security = HTTPBearer()
 
+# Supabase public JWKS endpoint — used to verify ES256 tokens
+_JWKS_CLIENT: jwt.PyJWKClient | None = None
+
+
+def _get_jwks_client() -> jwt.PyJWKClient:
+    global _JWKS_CLIENT
+    if _JWKS_CLIENT is None:
+        url = os.getenv("SUPABASE_URL")
+        _JWKS_CLIENT = jwt.PyJWKClient(f"{url}/auth/v1/.well-known/jwks.json")
+    return _JWKS_CLIENT
+
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
     token = credentials.credentials
-    jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
 
     try:
+        client = _get_jwks_client()
+        signing_key = client.get_signing_key_from_jwt(token)
         payload = jwt.decode(
             token,
-            jwt_secret,
-            algorithms=["HS256"],
+            signing_key.key,
+            algorithms=["ES256", "HS256"],
             options={"verify_aud": False},
         )
         user_id: str = payload.get("sub")
@@ -38,6 +50,7 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     except jwt.InvalidTokenError as e:
+        print(f"[JWT ERROR] {type(e).__name__}: {e}", flush=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Token validation failed: {str(e)}",

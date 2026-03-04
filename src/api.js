@@ -105,15 +105,18 @@ export const vaultAPI = {
 // Folder and file metadata are kept in localStorage as lightweight cache
 // so UI state (IDs, display names) survives across renders without round-trips.
 
-const META_KEY = 'nc_vault_meta'
+function metaKey() {
+    const user = auth.getUser()
+    return user ? `nc_vault_meta_${user.user_id}` : 'nc_vault_meta_anon'
+}
 
 function loadMeta() {
-    try { return JSON.parse(localStorage.getItem(META_KEY)) || { folders: [] } }
+    try { return JSON.parse(localStorage.getItem(metaKey())) || { folders: [] } }
     catch { return { folders: [] } }
 }
 
 function saveMeta(meta) {
-    localStorage.setItem(META_KEY, JSON.stringify(meta))
+    localStorage.setItem(metaKey(), JSON.stringify(meta))
 }
 
 function uid() { return crypto.randomUUID() }
@@ -161,12 +164,8 @@ function syncMetaFromCloud(rawFiles, meta) {
         })
     }
 
-    // Remove files from meta that no longer exist in cloud
-    const cloudPaths = new Set(rawFiles.map(f => f.path))
-    for (const folder of meta.folders) {
-        folder.files = folder.files.filter(f => cloudPaths.has(f.path))
-    }
-    meta.folders = meta.folders.filter(f => f.files.length > 0 || !f.slug)
+    // Never remove local-only files or folders — cloud sync only adds, never deletes local state
+    // Deletion is handled explicitly by the user via the delete button
     return meta
 }
 
