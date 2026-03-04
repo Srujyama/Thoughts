@@ -10,20 +10,10 @@ load_dotenv(Path(__file__).parent / ".env")
 
 app = FastAPI(title="Thoughts API", version="1.0.0")
 
-# Add your Vercel frontend URL here after deploying (e.g. "https://thoughts-xyz.vercel.app")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "")
-
-allowed_origins = [
-    "http://localhost:5173",
-    "http://localhost:4173",
-]
-if FRONTEND_URL:
-    allowed_origins.append(FRONTEND_URL)
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
