@@ -12,27 +12,58 @@ const THEMES = [
     { id: 'solarized',  label: 'Solarized' },
 ]
 
+// ── Hash routing helpers ──────────────────────────────────────
+// Scheme: #/  |  #/folder-slug  |  #/folder-slug/file-id
+function pushHash(parts) {
+    const hash = parts.length ? '#/' + parts.join('/') : '#/'
+    if (location.hash !== hash) history.pushState(null, '', hash)
+}
+
+function readHash() {
+    // Returns { folderSlug, fileId } or nulls
+    const raw = location.hash.replace(/^#\/?/, '')
+    if (!raw) return { folderSlug: null, fileId: null }
+    const [folderSlug, fileId] = raw.split('/')
+    return { folderSlug: folderSlug || null, fileId: fileId || null }
+}
+
 export class ThoughtCollector {
     constructor(containerEl, onLogout) {
         this.container = containerEl
         this.onLogout = onLogout
-        // view: 'folders' | 'files' | 'editor'
         this.view = 'folders'
         this.currentFolder = null
         this.currentFile = null
         this.editorDirty = false
-        // editorMode: 'split' | 'edit' | 'preview'
-        // On mobile we force 'edit', on desktop persist preference
         this.editorMode = this._isMobile()
             ? 'edit'
             : (localStorage.getItem(EDITOR_MODE_KEY) || 'split')
 
-        // Apply saved theme immediately
-        this._applyTheme(localStorage.getItem(THEME_KEY) || 'cyberpunk')
+        // Apply saved theme (default: typewriter)
+        this._applyTheme(localStorage.getItem(THEME_KEY) || 'typewriter')
 
-        this._render()
+        // Restore position from hash, then render
+        this._restoreFromHash()
+
+        // Browser back/forward
+        window.addEventListener('popstate', () => this._restoreFromHash())
+
+        // Keyboard shortcuts: Escape to navigate back
+        this._escHandler = (e) => {
+            if (e.key === 'Escape') {
+                if (this.view === 'editor') {
+                    if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
+                    this.editorDirty = false
+                    this._navigate('files')
+                } else if (this.view === 'files') {
+                    this._navigate('folders')
+                }
+            }
+        }
+        document.addEventListener('keydown', this._escHandler)
     }
 
+    // ── Theme ─────────────────────────────────────────────────
     _applyTheme(themeId) {
         const valid = THEMES.find(t => t.id === themeId)
         if (!valid) return
@@ -40,8 +71,65 @@ export class ThoughtCollector {
         localStorage.setItem(THEME_KEY, themeId)
     }
 
-    _isMobile() {
-        return window.innerWidth <= 768
+    _isMobile() { return window.innerWidth <= 768 }
+
+    // ── Routing ───────────────────────────────────────────────
+    _navigate(view, { folder, file } = {}) {
+        this.view = view
+        if (folder !== undefined) this.currentFolder = folder
+        if (file   !== undefined) this.currentFile   = file
+
+        if (view === 'folders') {
+            this.currentFolder = null
+            this.currentFile   = null
+            pushHash([])
+        } else if (view === 'files' && this.currentFolder) {
+            this.currentFile = null
+            pushHash([this.currentFolder.slug])
+        } else if (view === 'editor' && this.currentFolder && this.currentFile) {
+            pushHash([this.currentFolder.slug, this.currentFile.id])
+        }
+        this._render()
+    }
+
+    _restoreFromHash() {
+        // Make sure meta is loaded first
+        const { folderSlug, fileId } = readHash()
+        const meta = foldersAPI.list()
+
+        if (!folderSlug) {
+            this.view = 'folders'
+            this.currentFolder = null
+            this.currentFile   = null
+            this._render()
+            return
+        }
+
+        const folder = meta.find(f => f.slug === folderSlug)
+        if (!folder) {
+            // slug not yet in local cache — fall back to folders and sync
+            this.view = 'folders'
+            this._render()
+            return
+        }
+
+        this.currentFolder = folder
+
+        if (!fileId) {
+            this.view = 'files'
+            this._render()
+            return
+        }
+
+        // Try to open the file
+        const file = folder.files.find(f => f.id === fileId)
+        if (!file) {
+            this.view = 'files'
+            this._render()
+            return
+        }
+
+        this._openFile(file)
     }
 
     // ── Top-level render dispatcher ───────────────────────────
@@ -52,8 +140,8 @@ export class ThoughtCollector {
     }
 
     // ── Shared shell ──────────────────────────────────────────
-    _shell(breadcrumb, bodyHtml) {
-        const currentTheme = localStorage.getItem(THEME_KEY) || 'cyberpunk'
+    _shell(bodyHtml, { sidebar = true } = {}) {
+        const currentTheme = localStorage.getItem(THEME_KEY) || 'typewriter'
         const swatches = THEMES.map(t => `
             <button
                 class="theme-swatch ${t.id === currentTheme ? 'active' : ''}"
@@ -63,12 +151,35 @@ export class ThoughtCollector {
             ></button>
         `).join('')
 
+        // Build sidebar folder list
+        const allFolders = foldersAPI.list()
+        const sidebarItems = allFolders.map(f => `
+            <button class="sidebar-folder ${this.currentFolder?.id === f.id ? 'active' : ''}"
+                    data-folder-id="${f.id}" title="${this._esc(f.name)}">
+                <span class="sidebar-icon">▶</span>
+                <span class="sidebar-name">${this._esc(f.name)}</span>
+                <span class="sidebar-count">${f.files.length}</span>
+            </button>
+        `).join('')
+
+        const sidebarEl = sidebar ? `
+            <nav class="app-sidebar" id="app-sidebar">
+                <div class="sidebar-header">
+                    <span class="sidebar-title">FOLDERS</span>
+                    <button class="sidebar-new-btn" id="sidebar-new-folder" title="New folder">+</button>
+                </div>
+                <div class="sidebar-list">${sidebarItems || '<p class="sidebar-empty">No folders yet</p>'}</div>
+            </nav>
+        ` : ''
+
         return `
             <div class="app-shell">
                 <header class="app-header">
                     <div class="header-left">
-                        <h1 class="glitch-text small" data-text="THOUGHTS.EXE">THOUGHTS.EXE</h1>
-                        <nav class="breadcrumb">${breadcrumb}</nav>
+                        <button class="app-logo-btn" id="go-home" title="Home">
+                            <h1 class="glitch-text small" data-text="THOUGHTS.EXE">THOUGHTS.EXE</h1>
+                        </button>
+                        <nav class="breadcrumb" id="breadcrumb">${this._buildBreadcrumb()}</nav>
                     </div>
                     <div class="header-right">
                         <div class="theme-picker" id="theme-picker">${swatches}</div>
@@ -78,45 +189,93 @@ export class ThoughtCollector {
                         </button>
                     </div>
                 </header>
-                <main class="app-main">${bodyHtml}</main>
+                <div class="app-body">
+                    ${sidebarEl}
+                    <main class="app-main">${bodyHtml}</main>
+                </div>
                 <div class="scanlines"></div>
                 <div class="noise-overlay"></div>
             </div>
         `
     }
 
+    _buildBreadcrumb() {
+        if (this.view === 'folders') return ''
+        if (this.view === 'files' && this.currentFolder) {
+            return `/ <span class="breadcrumb-current">${this._esc(this.currentFolder.name)}</span>`
+        }
+        if (this.view === 'editor' && this.currentFolder && this.currentFile) {
+            return `
+                / <button class="breadcrumb-link" id="bc-folder">${this._esc(this.currentFolder.name)}</button>
+                / <span class="breadcrumb-current">${this._esc(this.currentFile.title)}</span>
+            `
+        }
+        return ''
+    }
+
     _loading(message = 'LOADING...') {
         return `<div class="empty-state"><p class="blink">> ${message}_</p></div>`
     }
 
-    _bindLogout() {
+    _bindShell() {
+        // Logout
         this.container.querySelector('#logout-btn').addEventListener('click', async () => {
+            document.removeEventListener('keydown', this._escHandler)
             await auth.logout()
             this.onLogout()
         })
+
+        // Home logo
+        this.container.querySelector('#go-home').addEventListener('click', () => {
+            if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
+            this.editorDirty = false
+            this._navigate('folders')
+        })
+
+        // Breadcrumb folder link (editor view)
+        const bcFolder = this.container.querySelector('#bc-folder')
+        if (bcFolder) {
+            bcFolder.addEventListener('click', () => {
+                if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
+                this.editorDirty = false
+                this._navigate('files')
+            })
+        }
+
         // Theme picker
         this.container.querySelectorAll('.theme-swatch').forEach(btn => {
             btn.addEventListener('click', () => {
                 this._applyTheme(btn.dataset.theme)
-                // Update active swatch without full re-render
                 this.container.querySelectorAll('.theme-swatch').forEach(b => {
                     b.classList.toggle('active', b.dataset.theme === btn.dataset.theme)
                 })
             })
         })
+
+        // Sidebar folder clicks
+        this.container.querySelectorAll('.sidebar-folder').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
+                this.editorDirty = false
+                const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
+                if (folder) this._navigate('files', { folder })
+            })
+        })
+
+        // Sidebar new folder button
+        const sidebarNewBtn = this.container.querySelector('#sidebar-new-folder')
+        if (sidebarNewBtn) {
+            sidebarNewBtn.addEventListener('click', () => this._promptNewFolder())
+        }
     }
 
     // ── Folders view ──────────────────────────────────────────
     _renderFolders() {
-        // Show cached folders immediately, then refresh from cloud in background
+        pushHash([])
         const folders = foldersAPI.list()
         this._paintFolders(folders)
-
-        // Background sync with cloud (retry once on network errors / cold starts)
         const doSync = () => foldersAPI.listFromCloud()
-            .then(updated => {
-                if (this.view === 'folders') this._paintFolders(updated)
-            })
+            .then(updated => { if (this.view === 'folders') this._paintFolders(updated) })
         doSync().catch(() => setTimeout(() => doSync().catch(() => {}), 5000))
     }
 
@@ -130,19 +289,19 @@ export class ThoughtCollector {
                         <span class="folder-meta">${f.files.length} file${f.files.length !== 1 ? 's' : ''}</span>
                     </div>
                     <div class="folder-actions">
-                        <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename">✎</button>
-                        <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete">✕</button>
+                        <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename">rn</button>
+                        <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete">x</button>
                     </div>
                 </div>
             `).join('')
             : `<div class="empty-state">
-                <p class="blink">> NO FOLDERS FOUND IN NEURAL DATABASE_</p>
+                <p class="blink">> NO FOLDERS FOUND_</p>
                 <p class="empty-sub">// CREATE A FOLDER TO BEGIN</p>
                </div>`
 
         const body = `
             <div class="toolbar">
-                <span class="section-label">// NEURAL_FOLDERS</span>
+                <span class="section-label">// FOLDERS</span>
                 <button class="cyber-btn compact-btn" id="new-folder-btn">
                     <span class="btn-text">+ NEW FOLDER</span>
                     <span class="btn-glow"></span>
@@ -151,8 +310,8 @@ export class ThoughtCollector {
             <div class="folder-grid" id="folder-grid">${folderCards}</div>
         `
 
-        this.container.innerHTML = this._shell('ROOT', body)
-        this._bindLogout()
+        this.container.innerHTML = this._shell(body)
+        this._bindShell()
 
         this.container.querySelector('#new-folder-btn').addEventListener('click', () => {
             this._promptNewFolder()
@@ -162,7 +321,7 @@ export class ThoughtCollector {
             card.addEventListener('click', (e) => {
                 if (e.target.closest('.folder-actions')) return
                 const folder = foldersAPI.list().find((f) => f.id === card.dataset.id)
-                if (folder) this._openFolder(folder)
+                if (folder) this._navigate('files', { folder })
             })
         })
 
@@ -214,20 +373,11 @@ export class ThoughtCollector {
             .catch(err => this._toast(`> DELETE ERROR: ${err.message}`))
     }
 
-    _openFolder(folder) {
-        this.currentFolder = folder
-        this.view = 'files'
-        this._render()
-    }
-
     // ── Files view ────────────────────────────────────────────
     _renderFiles() {
         this.currentFolder = foldersAPI.list().find((f) => f.id === this.currentFolder.id)
-        if (!this.currentFolder) {
-            this.view = 'folders'
-            this._render()
-            return
-        }
+        if (!this.currentFolder) { this._navigate('folders'); return }
+        pushHash([this.currentFolder.slug])
         this._paintFiles(this.currentFolder.files)
     }
 
@@ -237,40 +387,60 @@ export class ThoughtCollector {
         const fileCards = files.length
             ? files.map((f) => `
                 <div class="file-card" data-id="${f.id}">
-                    <div class="file-icon">◈</div>
+                    <div class="file-icon">#</div>
                     <div class="file-info">
                         <span class="file-title">${this._esc(f.title)}</span>
                         <span class="file-meta">// ${this._relTime(f.updated_at)}</span>
                     </div>
                     <div class="file-actions">
-                        <button class="icon-btn delete-file-btn" data-id="${f.id}" title="Delete">✕</button>
+                        <button class="icon-btn delete-file-btn" data-id="${f.id}" title="Delete">x</button>
                     </div>
                 </div>
             `).join('')
             : `<div class="empty-state">
                 <p class="blink">> NO FILES IN THIS FOLDER_</p>
-                <p class="empty-sub">// CREATE A FILE TO BEGIN</p>
+                <p class="empty-sub">// CREATE OR UPLOAD A FILE TO BEGIN</p>
                </div>`
 
         const body = `
             <div class="toolbar">
                 <span class="section-label">// ${this._esc(folder.name).toUpperCase()}</span>
-                <button class="cyber-btn compact-btn" id="new-file-btn">
-                    <span class="btn-text">+ NEW FILE</span>
-                    <span class="btn-glow"></span>
-                </button>
+                <div class="toolbar-actions">
+                    <button class="cyber-btn compact-btn" id="upload-md-btn" title="Upload .md file">
+                        <span class="btn-text">↑ UPLOAD .MD</span>
+                        <span class="btn-glow"></span>
+                    </button>
+                    <input type="file" id="md-file-input" accept=".md,text/markdown" multiple style="display:none">
+                    <button class="cyber-btn compact-btn" id="new-file-btn">
+                        <span class="btn-text">+ NEW FILE</span>
+                        <span class="btn-glow"></span>
+                    </button>
+                </div>
             </div>
             <div class="file-list" id="file-list">${fileCards}</div>
         `
 
-        const breadcrumb = `<button class="breadcrumb-link" id="back-to-folders">ROOT</button> / ${this._esc(folder.name)}`
-        this.container.innerHTML = this._shell(breadcrumb, body)
-        this._bindLogout()
+        this.container.innerHTML = this._shell(body)
+        this._bindShell()
 
-        this.container.querySelector('#back-to-folders').addEventListener('click', () => {
-            this.view = 'folders'
-            this.currentFolder = null
-            this._render()
+        // Upload .md
+        const uploadBtn  = this.container.querySelector('#upload-md-btn')
+        const fileInput  = this.container.querySelector('#md-file-input')
+        uploadBtn.addEventListener('click', () => fileInput.click())
+        fileInput.addEventListener('change', () => this._handleMdUpload(fileInput))
+
+        // Drag-and-drop on the file list
+        const fileList = this.container.querySelector('#file-list')
+        fileList.addEventListener('dragover', e => { e.preventDefault(); fileList.classList.add('drag-over') })
+        fileList.addEventListener('dragleave', () => fileList.classList.remove('drag-over'))
+        fileList.addEventListener('drop', e => {
+            e.preventDefault()
+            fileList.classList.remove('drag-over')
+            const dt = e.dataTransfer
+            if (dt?.files?.length) {
+                const fakeInput = { files: Array.from(dt.files).filter(f => f.name.endsWith('.md')) }
+                if (fakeInput.files.length) this._handleMdUpload(fakeInput)
+            }
         })
 
         this.container.querySelector('#new-file-btn').addEventListener('click', () => {
@@ -293,6 +463,31 @@ export class ThoughtCollector {
         })
     }
 
+    // ── .md upload ────────────────────────────────────────────
+    async _handleMdUpload(input) {
+        const files = Array.from(input.files || [])
+        if (!files.length) return
+
+        let succeeded = 0
+        for (const f of files) {
+            try {
+                const content = await f.text()
+                const title   = f.name.replace(/\.md$/i, '').replace(/-/g, ' ')
+                await filesAPI.create(this.currentFolder.id, title, content)
+                succeeded++
+            } catch (err) {
+                this._toast(`> UPLOAD ERROR: ${f.name}: ${err.message}`)
+            }
+        }
+        if (succeeded) {
+            this._toast(`> UPLOADED ${succeeded} FILE${succeeded > 1 ? 'S' : ''}`)
+            this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
+            this._render()
+        }
+        // Reset input so re-uploading same file works
+        if (input.value !== undefined) input.value = ''
+    }
+
     _promptNewFile() {
         const title = prompt('File title:')
         if (!title || !title.trim()) return
@@ -313,24 +508,15 @@ export class ThoughtCollector {
             .catch(err => this._toast(`> DELETE ERROR: ${err.message}`))
     }
 
+    // ── Open file ─────────────────────────────────────────────
     _openFile(file) {
-        // Always fetch fresh content from cloud — never render stale cached content
         this.currentFile = file
         this.view = 'editor'
         this.editorDirty = false
-        const breadcrumb = `
-            <button class="breadcrumb-link" id="back-to-folders">ROOT</button>
-            / <button class="breadcrumb-link" id="back-to-files">${this._esc(this.currentFolder.name)}</button>
-            / ${this._esc(file.title)}
-        `
-        this.container.innerHTML = this._shell(breadcrumb, this._loading('LOADING FILE'))
-        this._bindLogout()
-        this.container.querySelector('#back-to-folders').addEventListener('click', () => {
-            this.view = 'folders'; this.currentFolder = null; this.currentFile = null; this._render()
-        })
-        this.container.querySelector('#back-to-files').addEventListener('click', () => {
-            this.view = 'files'; this.currentFile = null; this._render()
-        })
+        pushHash([this.currentFolder.slug, file.id])
+
+        this.container.innerHTML = this._shell(this._loading('LOADING FILE'))
+        this._bindShell()
 
         filesAPI.loadContent(this.currentFolder.id, file.id)
             .then(loaded => {
@@ -346,14 +532,13 @@ export class ThoughtCollector {
         const folder = this.currentFolder
         const mode = this._isMobile() ? 'edit' : this.editorMode
 
-        // Mode toggle buttons — hide SPLIT on mobile
         const modeButtons = `
             <div class="mode-toggle" id="mode-toggle">
                 ${!this._isMobile() ? `
-                <button class="mode-btn ${mode === 'split' ? 'active' : ''}" data-mode="split" title="Split view">⬜</button>
+                <button class="mode-btn ${mode === 'split' ? 'active' : ''}" data-mode="split" title="Split view">[ | ]</button>
                 ` : ''}
-                <button class="mode-btn ${mode === 'edit' ? 'active' : ''}" data-mode="edit" title="Edit only">✎</button>
-                <button class="mode-btn ${mode === 'preview' ? 'active' : ''}" data-mode="preview" title="Preview only">👁</button>
+                <button class="mode-btn ${mode === 'edit' ? 'active' : ''}" data-mode="edit" title="Edit only">[&nbsp;e&nbsp;]</button>
+                <button class="mode-btn ${mode === 'preview' ? 'active' : ''}" data-mode="preview" title="Preview only">[&nbsp;p&nbsp;]</button>
             </div>
         `
 
@@ -391,17 +576,13 @@ export class ThoughtCollector {
                 </div>
                 <div class="editor-footer">
                     <span class="char-count" id="char-count">${(file.content || '').length} chars</span>
+                    <span class="editor-hint">ESC to go back</span>
                 </div>
             </div>
         `
 
-        const breadcrumb = `
-            <button class="breadcrumb-link" id="back-to-folders">ROOT</button>
-            / <button class="breadcrumb-link" id="back-to-files">${this._esc(folder.name)}</button>
-            / ${this._esc(file.title)}
-        `
-        this.container.innerHTML = this._shell(breadcrumb, body)
-        this._bindLogout()
+        this.container.innerHTML = this._shell(body)
+        this._bindShell()
 
         const titleInput  = this.container.querySelector('#file-title')
         const contentArea = this.container.querySelector('#file-content')
@@ -411,41 +592,15 @@ export class ThoughtCollector {
         const preview     = this.container.querySelector('#editor-preview')
         const editorZone  = this.container.querySelector('#editor-zone')
 
-        // Set textarea value directly (avoids HTML encoding issues with innerHTML)
         contentArea.value = file.content || ''
-
-        // Initial preview render
         this._renderPreview(preview, contentArea.value)
 
-        // Click preview to switch to edit mode
         preview.addEventListener('click', () => {
-            if (editorZone.dataset.mode === 'preview') {
-                this._setEditorMode('edit', editorZone)
-            }
+            if (editorZone.dataset.mode === 'preview') this._setEditorMode('edit', editorZone)
         })
 
-        // Mode toggle buttons
         this.container.querySelectorAll('.mode-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                this._setEditorMode(btn.dataset.mode, editorZone)
-            })
-        })
-
-        this.container.querySelector('#back-to-folders').addEventListener('click', () => {
-            if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
-            this.view = 'folders'
-            this.currentFolder = null
-            this.currentFile = null
-            this.editorDirty = false
-            this._render()
-        })
-
-        this.container.querySelector('#back-to-files').addEventListener('click', () => {
-            if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
-            this.view = 'files'
-            this.currentFile = null
-            this.editorDirty = false
-            this._render()
+            btn.addEventListener('click', () => this._setEditorMode(btn.dataset.mode, editorZone))
         })
 
         const markDirty = () => {
@@ -454,7 +609,6 @@ export class ThoughtCollector {
             saveStatus.className = 'save-status unsaved'
         }
 
-        // Live preview update (debounced)
         let previewTimer = null
         titleInput.addEventListener('input', markDirty)
         contentArea.addEventListener('input', () => {
@@ -467,7 +621,6 @@ export class ThoughtCollector {
         const doSave = () => {
             saveBtn.disabled = true
             saveBtn.querySelector('.btn-text').textContent = 'SAVING...'
-
             filesAPI.update(folder.id, file.id, {
                 title: titleInput.value,
                 content: contentArea.value,
@@ -488,7 +641,6 @@ export class ThoughtCollector {
 
         saveBtn.addEventListener('click', doSave)
 
-        // Cmd/Ctrl+S
         const handleSaveKey = (e) => {
             if (e.key === 's' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); doSave() }
         }
@@ -500,29 +652,24 @@ export class ThoughtCollector {
         if (typeof marked !== 'undefined') {
             previewEl.innerHTML = marked.parse(markdown || '')
         } else {
-            // fallback: show raw text
             previewEl.textContent = markdown || ''
         }
     }
 
     _setEditorMode(mode, editorZone) {
-        // Ignore split on mobile
         if (mode === 'split' && this._isMobile()) mode = 'edit'
         this.editorMode = mode
         localStorage.setItem(EDITOR_MODE_KEY, mode)
         if (!editorZone) return
         editorZone.dataset.mode = mode
-        // Update active button highlight
         editorZone.querySelectorAll('.mode-btn').forEach(btn => {
             btn.classList.toggle('active', btn.dataset.mode === mode)
         })
-        // If switching to preview, focus the preview pane
         if (mode === 'preview') {
             const contentArea = editorZone.querySelector('#file-content')
             const preview = editorZone.querySelector('#editor-preview')
             if (contentArea && preview) this._renderPreview(preview, contentArea.value)
         }
-        // If switching to edit, focus textarea
         if (mode === 'edit') {
             const contentArea = editorZone.querySelector('#file-content')
             if (contentArea) setTimeout(() => contentArea.focus(), 50)

@@ -566,12 +566,32 @@ body {
     opacity: 0.7;
 }
 
+/* ── Logo button (home) ──────────────────────────────────────── */
+.app-logo-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+/* ── Breadcrumb current (non-clickable) ──────────────────────── */
+.breadcrumb-current {
+    color: var(--nc-text-dim);
+}
+
 /* ── Toolbar ─────────────────────────────────────────────────── */
 .toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     margin-bottom: 1.5rem;
+}
+
+.toolbar-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
 }
 
 .section-label {
@@ -733,6 +753,14 @@ body {
     background: rgba(255, 0, 60, 0.1);
 }
 
+/* ── Drag-over state for file list ───────────────────────────── */
+.file-list.drag-over {
+    outline: 2px dashed var(--t-accent, var(--nc-red));
+    outline-offset: -4px;
+    background: rgba(0,0,0,0.03);
+    border-radius: 2px;
+}
+
 /* ── Editor ──────────────────────────────────────────────────── */
 .editor-zone {
     display: flex;
@@ -741,11 +769,10 @@ body {
     height: calc(100vh - 120px);
 }
 
-/* In split mode, expand the main content area beyond the default 720px */
-.app-main:has(.editor-zone[data-mode="split"]) {
-    max-width: 100%;
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
+/* In split mode, expand the main content area to fill full width */
+.app-body:has(.editor-zone[data-mode="split"]) .app-main {
+    padding-left: 1rem;
+    padding-right: 1rem;
 }
 
 .editor-toolbar {
@@ -904,7 +931,14 @@ body {
 
 .editor-footer {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.editor-hint {
+    font-size: 0.7rem;
+    color: var(--nc-text-dim);
+    opacity: 0.6;
 }
 
 /* ── Markdown Preview Styling ────────────────────────────────── */
@@ -1404,6 +1438,128 @@ body {
     color: var(--nc-yellow);
 }
 
+/* ── App Body (sidebar + main) ───────────────────────────────── */
+.app-body {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────── */
+.app-sidebar {
+    width: 200px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--t-header-border, var(--nc-red-dim));
+    background: var(--t-header-bg, var(--nc-bg-dark));
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    padding: 1rem 0;
+}
+
+.sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 1rem 0.75rem;
+    border-bottom: 1px solid var(--t-divider-color, var(--nc-red-dim));
+    margin-bottom: 0.5rem;
+}
+
+.sidebar-title {
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    color: var(--t-label-color, var(--nc-text-dim));
+    font-family: var(--t-font-heading);
+}
+
+.sidebar-new-btn {
+    background: none;
+    border: 1px solid var(--t-divider-color, var(--nc-red-dim));
+    color: var(--t-accent, var(--nc-red));
+    font-size: 1rem;
+    line-height: 1;
+    width: 22px;
+    height: 22px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-new-btn:hover {
+    background: var(--t-accent, var(--nc-red));
+    color: var(--nc-bg-void);
+}
+
+.sidebar-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.sidebar-folder {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+    transition: background 0.15s;
+    color: var(--nc-text);
+    font-family: var(--t-font-ui);
+    font-size: 0.82rem;
+}
+
+.sidebar-folder:hover {
+    background: rgba(0,0,0,0.06);
+}
+
+.sidebar-folder.active {
+    background: var(--t-mode-btn-active-bg, var(--nc-red));
+    color: var(--t-mode-btn-active-color, var(--nc-bg-void));
+}
+
+.sidebar-icon {
+    font-size: 0.6rem;
+    flex-shrink: 0;
+    color: var(--t-accent2, var(--nc-cyan));
+}
+
+.sidebar-folder.active .sidebar-icon {
+    color: inherit;
+}
+
+.sidebar-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sidebar-count {
+    font-size: 0.7rem;
+    color: var(--nc-text-dim);
+    flex-shrink: 0;
+}
+
+.sidebar-folder.active .sidebar-count {
+    color: inherit;
+    opacity: 0.7;
+}
+
+.sidebar-empty {
+    padding: 0.5rem 1rem;
+    font-size: 0.75rem;
+    color: var(--nc-text-dim);
+}
+
 /* ── App Main Content ────────────────────────────────────────── */
 .app-main {
     flex: 1;
@@ -1413,7 +1569,15 @@ body {
     padding: 2rem 1.5rem;
     display: flex;
     flex-direction: column;
-    gap: 2.5rem;
+    gap: 2rem;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+/* Expand app-main when sidebar is present */
+.app-body .app-main {
+    max-width: none;
+    margin: 0;
 }
 
 /* ── Input Zone ──────────────────────────────────────────────── */
@@ -1593,6 +1757,10 @@ body {
 }
 
 /* ── Responsive ──────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    .app-sidebar { display: none; }
+}
+
 @media (max-width: 600px) {
     .app-header {
         padding: 0.75rem 1rem;
@@ -1624,5 +1792,11 @@ body {
         right: 1rem;
         left: 1rem;
         max-width: none;
+    }
+
+    .toolbar-actions {
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.35rem;
     }
 }
