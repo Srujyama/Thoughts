@@ -135,6 +135,7 @@ function syncMetaFromCloud(rawFiles, meta) {
     for (const item of rawFiles) {
         const path = item.path
         if (!path || !path.includes('/')) continue          // skip root-level files
+            if (path.endsWith('/.keep')) continue               // skip folder markers
         const [folderSlug, ...rest] = path.split('/')
         const fileSlug = rest.join('/')
 
@@ -182,7 +183,7 @@ export const foldersAPI = {
         return loadMeta().folders
     },
 
-    create(name) {
+    async create(name) {
         const meta = loadMeta()
         const folder = {
             id: uid(),
@@ -193,6 +194,8 @@ export const foldersAPI = {
         }
         meta.folders.push(folder)
         saveMeta(meta)
+        // Persist folder to cloud so it syncs across devices
+        await vaultAPI.writeFile(folder.slug + '/.keep', '')
         return folder
     },
 
