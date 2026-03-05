@@ -1,6 +1,5 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from routers import auth, thoughts, vault
 from dotenv import load_dotenv
 from pathlib import Path
@@ -15,8 +14,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -27,15 +26,3 @@ app.include_router(vault.router, prefix="/vault", tags=["vault"])
 @app.get("/health")
 def health_check():
     return {"status": "online", "message": "NIGHT CITY ONLINE"}
-
-
-@app.options("/{full_path:path}")
-async def options_handler(full_path: str, request: Request):
-    return JSONResponse(
-        content={},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PATCH",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept",
-        },
-    )
