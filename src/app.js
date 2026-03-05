@@ -49,10 +49,13 @@ export class ThoughtCollector {
         window.addEventListener('popstate', () => this._restoreFromHash())
 
         // Keyboard shortcuts: Escape to navigate back
-        this._escHandler = (e) => {
+        this._escHandler = async (e) => {
             if (e.key === 'Escape') {
                 if (this.view === 'editor') {
-                    if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
+                    if (this.editorDirty) {
+                        const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                        if (!ok) return
+                    }
                     this.editorDirty = false
                     this._navigate('files')
                 } else if (this.view === 'files') {
@@ -226,8 +229,11 @@ export class ThoughtCollector {
         })
 
         // Home logo
-        this.container.querySelector('#go-home').addEventListener('click', () => {
-            if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
+        this.container.querySelector('#go-home').addEventListener('click', async () => {
+            if (this.editorDirty) {
+                const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                if (!ok) return
+            }
             this.editorDirty = false
             this._navigate('folders')
         })
@@ -235,8 +241,11 @@ export class ThoughtCollector {
         // Breadcrumb folder link (editor view)
         const bcFolder = this.container.querySelector('#bc-folder')
         if (bcFolder) {
-            bcFolder.addEventListener('click', () => {
-                if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
+            bcFolder.addEventListener('click', async () => {
+                if (this.editorDirty) {
+                    const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                    if (!ok) return
+                }
                 this.editorDirty = false
                 this._navigate('files')
             })
@@ -254,8 +263,11 @@ export class ThoughtCollector {
 
         // Sidebar folder clicks
         this.container.querySelectorAll('.sidebar-folder').forEach(btn => {
-            btn.addEventListener('click', () => {
-                if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
+            btn.addEventListener('click', async () => {
+                if (this.editorDirty) {
+                    const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                    if (!ok) return
+                }
                 this.editorDirty = false
                 const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
                 if (folder) this._navigate('files', { folder })
@@ -341,8 +353,8 @@ export class ThoughtCollector {
     }
 
     async _promptNewFolder() {
-        const name = prompt('Folder name:')
-        if (!name || !name.trim()) return
+        const name = await this._showModal({ type: 'input', title: 'NEW FOLDER', placeholder: 'Folder name...' })
+        if (!name) return
         try {
             await foldersAPI.create(name)
             this._render()
@@ -351,11 +363,11 @@ export class ThoughtCollector {
         }
     }
 
-    _renameFolder(id) {
+    async _renameFolder(id) {
         const folder = foldersAPI.list().find((f) => f.id === id)
         if (!folder) return
-        const name = prompt('New name:', folder.name)
-        if (!name || !name.trim()) return
+        const name = await this._showModal({ type: 'input', title: 'RENAME FOLDER', placeholder: 'New name...', defaultValue: folder.name })
+        if (!name) return
         try {
             foldersAPI.rename(id, name)
             this._render()
@@ -364,10 +376,11 @@ export class ThoughtCollector {
         }
     }
 
-    _deleteFolder(id) {
+    async _deleteFolder(id) {
         const folder = foldersAPI.list().find((f) => f.id === id)
         if (!folder) return
-        if (!confirm(`Delete folder "${folder.name}" and all its files?`)) return
+        const ok = await this._showModal({ type: 'confirm', title: 'DELETE FOLDER', message: `Delete "${folder.name}" and all its files?` })
+        if (!ok) return
         foldersAPI.delete(id)
             .then(() => { if (this.view === 'folders') this._render() })
             .catch(err => this._toast(`> DELETE ERROR: ${err.message}`))
@@ -488,18 +501,19 @@ export class ThoughtCollector {
         if (input.value !== undefined) input.value = ''
     }
 
-    _promptNewFile() {
-        const title = prompt('File title:')
-        if (!title || !title.trim()) return
+    async _promptNewFile() {
+        const title = await this._showModal({ type: 'input', title: 'NEW FILE', placeholder: 'File title...' })
+        if (!title) return
         filesAPI.create(this.currentFolder.id, title)
             .then(file => this._openFile(file))
             .catch(err => this._toast(`> ERROR: ${err.message}`))
     }
 
-    _deleteFile(fileId) {
+    async _deleteFile(fileId) {
         const file = this.currentFolder.files.find((f) => f.id === fileId)
         if (!file) return
-        if (!confirm(`Delete file "${file.title}"?`)) return
+        const ok = await this._showModal({ type: 'confirm', title: 'DELETE FILE', message: `Delete "${file.title}"?` })
+        if (!ok) return
         filesAPI.delete(this.currentFolder.id, fileId)
             .then(() => {
                 this.currentFolder = foldersAPI.list().find((f) => f.id === this.currentFolder.id)
@@ -677,6 +691,59 @@ export class ThoughtCollector {
     }
 
     // ── Utilities ─────────────────────────────────────────────
+    _showModal({ type = 'confirm', title = '', message = '', placeholder = '', defaultValue = '' } = {}) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div')
+            overlay.className = 'modal-overlay'
+
+            if (type === 'input') {
+                overlay.innerHTML = `
+                    <div class="modal-box">
+                        <div class="modal-title">${title}</div>
+                        <input class="modal-input" type="text" placeholder="${placeholder}" value="${this._esc(defaultValue)}" />
+                        <div class="modal-actions">
+                            <button class="modal-btn modal-cancel">CANCEL</button>
+                            <button class="modal-btn modal-confirm">OK</button>
+                        </div>
+                    </div>`
+                document.body.appendChild(overlay)
+                const input = overlay.querySelector('.modal-input')
+                input.focus(); input.select()
+                const confirm = () => { const v = input.value.trim(); overlay.remove(); resolve(v || null) }
+                const cancel  = () => { overlay.remove(); resolve(null) }
+                overlay.querySelector('.modal-confirm').addEventListener('click', confirm)
+                overlay.querySelector('.modal-cancel').addEventListener('click', cancel)
+                overlay.addEventListener('click', e => { if (e.target === overlay) cancel() })
+                input.addEventListener('keydown', e => {
+                    if (e.key === 'Enter') confirm()
+                    if (e.key === 'Escape') cancel()
+                })
+            } else {
+                overlay.innerHTML = `
+                    <div class="modal-box">
+                        <div class="modal-title">${title}</div>
+                        ${message ? `<div class="modal-message">${message}</div>` : ''}
+                        <div class="modal-actions">
+                            <button class="modal-btn modal-cancel">CANCEL</button>
+                            <button class="modal-btn modal-confirm danger">OK</button>
+                        </div>
+                    </div>`
+                document.body.appendChild(overlay)
+                const yes = () => { overlay.remove(); resolve(true) }
+                const no  = () => { overlay.remove(); resolve(false) }
+                overlay.querySelector('.modal-confirm').addEventListener('click', yes)
+                overlay.querySelector('.modal-cancel').addEventListener('click', no)
+                overlay.addEventListener('click', e => { if (e.target === overlay) no() })
+                overlay.setAttribute('tabindex', '-1')
+                overlay.focus()
+                overlay.addEventListener('keydown', e => {
+                    if (e.key === 'Enter') yes()
+                    if (e.key === 'Escape') no()
+                })
+            }
+        })
+    }
+
     _toast(message) {
         const toast = document.createElement('div')
         toast.className = 'cyber-toast'
