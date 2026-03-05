@@ -2,6 +2,15 @@
 import { foldersAPI, filesAPI, auth } from './api.js'
 
 const EDITOR_MODE_KEY = 'nc_editor_mode'
+const THEME_KEY       = 'nc_theme'
+
+const THEMES = [
+    { id: 'cyberpunk',  label: 'Cyberpunk' },
+    { id: 'docs',       label: 'Docs' },
+    { id: 'typewriter', label: 'Typewriter' },
+    { id: 'nord',       label: 'Nord' },
+    { id: 'solarized',  label: 'Solarized' },
+]
 
 export class ThoughtCollector {
     constructor(containerEl, onLogout) {
@@ -18,7 +27,17 @@ export class ThoughtCollector {
             ? 'edit'
             : (localStorage.getItem(EDITOR_MODE_KEY) || 'split')
 
+        // Apply saved theme immediately
+        this._applyTheme(localStorage.getItem(THEME_KEY) || 'cyberpunk')
+
         this._render()
+    }
+
+    _applyTheme(themeId) {
+        const valid = THEMES.find(t => t.id === themeId)
+        if (!valid) return
+        document.documentElement.setAttribute('data-theme', themeId)
+        localStorage.setItem(THEME_KEY, themeId)
     }
 
     _isMobile() {
@@ -34,6 +53,16 @@ export class ThoughtCollector {
 
     // ── Shared shell ──────────────────────────────────────────
     _shell(breadcrumb, bodyHtml) {
+        const currentTheme = localStorage.getItem(THEME_KEY) || 'cyberpunk'
+        const swatches = THEMES.map(t => `
+            <button
+                class="theme-swatch ${t.id === currentTheme ? 'active' : ''}"
+                data-theme="${t.id}"
+                title="${t.label}"
+                aria-label="Switch to ${t.label} theme"
+            ></button>
+        `).join('')
+
         return `
             <div class="app-shell">
                 <header class="app-header">
@@ -41,10 +70,13 @@ export class ThoughtCollector {
                         <h1 class="glitch-text small" data-text="THOUGHTS.EXE">THOUGHTS.EXE</h1>
                         <nav class="breadcrumb">${breadcrumb}</nav>
                     </div>
-                    <button class="cyber-btn logout-btn" id="logout-btn">
-                        <span class="btn-text">JACK OUT</span>
-                        <span class="btn-glow"></span>
-                    </button>
+                    <div class="header-right">
+                        <div class="theme-picker" id="theme-picker">${swatches}</div>
+                        <button class="cyber-btn logout-btn" id="logout-btn">
+                            <span class="btn-text">JACK OUT</span>
+                            <span class="btn-glow"></span>
+                        </button>
+                    </div>
                 </header>
                 <main class="app-main">${bodyHtml}</main>
                 <div class="scanlines"></div>
@@ -61,6 +93,16 @@ export class ThoughtCollector {
         this.container.querySelector('#logout-btn').addEventListener('click', async () => {
             await auth.logout()
             this.onLogout()
+        })
+        // Theme picker
+        this.container.querySelectorAll('.theme-swatch').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this._applyTheme(btn.dataset.theme)
+                // Update active swatch without full re-render
+                this.container.querySelectorAll('.theme-swatch').forEach(b => {
+                    b.classList.toggle('active', b.dataset.theme === btn.dataset.theme)
+                })
+            })
         })
     }
 
