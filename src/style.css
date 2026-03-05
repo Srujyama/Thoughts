@@ -1588,6 +1588,11 @@ body {
     min-height: 0;
 }
 
+/* Prevent outer scroll in editor view — textarea and preview pane scroll internally */
+.app-main:has(.editor-zone) {
+    overflow: hidden;
+}
+
 /* Expand app-main when sidebar is present */
 .app-body .app-main {
     max-width: none;
