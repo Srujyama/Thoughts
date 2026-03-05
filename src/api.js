@@ -258,11 +258,10 @@ export const filesAPI = {
         const file = folder.files.find(f => f.id === fileId)
         if (!file) throw new Error('File not found')
 
-        if (!file.contentLoaded) {
-            file.content = await vaultAPI.readFile(file.path)
-            file.contentLoaded = true
-            saveMeta(meta)
-        }
+        // Always fetch fresh content from cloud so edits on other devices are visible
+        file.content = await vaultAPI.readFile(file.path)
+        file.contentLoaded = true
+        saveMeta(meta)
         return file
     },
 
