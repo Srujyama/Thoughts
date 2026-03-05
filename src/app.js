@@ -272,37 +272,30 @@ export class ThoughtCollector {
     }
 
     _openFile(file) {
-        if (!file.contentLoaded) {
-            // Show loading state while fetching content from cloud
-            this.currentFile = file
-            this.view = 'editor'
-            this.editorDirty = false
-            const breadcrumb = `
-                <button class="breadcrumb-link" id="back-to-folders">ROOT</button>
-                / <button class="breadcrumb-link" id="back-to-files">${this._esc(this.currentFolder.name)}</button>
-                / ${this._esc(file.title)}
-            `
-            this.container.innerHTML = this._shell(breadcrumb, this._loading('LOADING FILE'))
-            this._bindLogout()
-            this.container.querySelector('#back-to-folders').addEventListener('click', () => {
-                this.view = 'folders'; this.currentFolder = null; this.currentFile = null; this._render()
-            })
-            this.container.querySelector('#back-to-files').addEventListener('click', () => {
-                this.view = 'files'; this.currentFile = null; this._render()
-            })
+        // Always fetch fresh content from cloud — never render stale cached content
+        this.currentFile = file
+        this.view = 'editor'
+        this.editorDirty = false
+        const breadcrumb = `
+            <button class="breadcrumb-link" id="back-to-folders">ROOT</button>
+            / <button class="breadcrumb-link" id="back-to-files">${this._esc(this.currentFolder.name)}</button>
+            / ${this._esc(file.title)}
+        `
+        this.container.innerHTML = this._shell(breadcrumb, this._loading('LOADING FILE'))
+        this._bindLogout()
+        this.container.querySelector('#back-to-folders').addEventListener('click', () => {
+            this.view = 'folders'; this.currentFolder = null; this.currentFile = null; this._render()
+        })
+        this.container.querySelector('#back-to-files').addEventListener('click', () => {
+            this.view = 'files'; this.currentFile = null; this._render()
+        })
 
-            filesAPI.loadContent(this.currentFolder.id, file.id)
-                .then(loaded => {
-                    this.currentFile = loaded
-                    if (this.view === 'editor') this._renderEditor()
-                })
-                .catch(err => this._toast(`> LOAD ERROR: ${err.message}`))
-        } else {
-            this.currentFile = file
-            this.view = 'editor'
-            this.editorDirty = false
-            this._renderEditor()
-        }
+        filesAPI.loadContent(this.currentFolder.id, file.id)
+            .then(loaded => {
+                this.currentFile = loaded
+                if (this.view === 'editor') this._renderEditor()
+            })
+            .catch(err => this._toast(`> LOAD ERROR: ${err.message}`))
     }
 
     // ── Editor view ───────────────────────────────────────────
