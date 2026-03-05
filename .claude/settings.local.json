@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(lsof -ti:5173)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(curl -s -X POST http://localhost:8000/auth/login -H \"Content-Type: application/json\" -d '{\"\"email\"\":\"\"test@test.com\"\",\"\"password\"\":\"\"wrongpassword\"\"}')",
+      "Bash(.venv/bin/python -c \":*)",
+      "Bash(curl -s -X POST http://localhost:8000/auth/signup -H \"Content-Type: application/json\" -d '{\"\"email\"\":\"\"test@nightcity.net\"\",\"\"password\"\":\"\"testpass123\"\"}')",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://atoliioptwskoqnoipa.supabase.co)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://google.com)",
+      "Bash(curl -sv -X POST http://localhost:8000/auth/signup -H \"Content-Type: application/json\" -d '{\"\"email\"\":\"\"srujanyamali@gmail.com\"\",\"\"password\"\":\"\"testpass123\"\"}')",
+      "Bash(lsof -ti:8000)",
+      "Bash(xargs kill -9)",
+      "Bash(kill -9 46217)",
+      "Bash(curl -s -X POST http://127.0.0.1:8080/auth/signup -H \"Content-Type: application/json\" -d '{\"\"email\"\":\"\"testdebug999@example.com\"\",\"\"password\"\":\"\"TestPass123!\"\"}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s -X POST http://127.0.0.1:8080/auth/signup -H \"Content-Type: application/json\" -d \"{\"\"email\"\":\"\"testdebug999@example.com\"\",\"\"password\"\":\"\"TestPass123!\"\"}\")",
+      "Bash(curl -s -X POST 'http://127.0.0.1:8080/auth/signup' -H 'Content-Type: application/json' --data-raw '{\"\"email\"\":\"\"testdebug999@example.com\"\",\"\"password\"\":\"\"TestPass123!\"\"}')",
+      "Bash(curl -s -X POST 'http://127.0.0.1:8080/auth/signup' -H 'Content-Type: application/json' --data-binary '{\"\"email\"\":\"\"testdebug999@example.com\"\",\"\"password\"\":\"\"TestPass123x\"\"}')",
+      "Bash(lsof -ti:8080)",
+      "Bash(xargs ps -p)",
+      "Bash(lsof -i:8080 -n -P)",
+      "Bash(python3 -c \"import socket; print\\(socket.getaddrinfo\\(''google.com'', 80\\)[0]\\)\")",
+      "Bash(python3 -c \"import socket; print\\(socket.getaddrinfo\\(''supabase.co'', 443\\)[0]\\)\")",
+      "Bash(python3 -c \"import socket; print\\(socket.getaddrinfo\\(''atoliioptwskoqnoipa.supabase.co'', 443\\)[0]\\)\")",
+      "Bash(nslookup atoliioptwskoqnoipa.supabase.co)",
+      "Bash(dig atoliioptwskoqnoipa.supabase.co)",
+      "Bash(python3 -c \"import socket; print\\(socket.getaddrinfo\\(''atoliiojptwskoqnoipa.supabase.co'', 443\\)[0]\\)\")",
+      "Bash(curl -s \"https://atoliiojptwskoqnoipa.supabase.co/auth/v1/.well-known/jwks.json\")",
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts status)"
+    ]
+  }
+}
