@@ -854,15 +854,12 @@ export class ThoughtCollector {
     }
 
     _normaliseMath(md) {
-        // Convert multi-line [ ... ] display math blocks to $$...$$
-        // Handles both single-line "[ y = \sin(x) ]" and multi-line:
-        //   [
-        //   y = \sin(x)
-        //   ]
-        md = md.replace(/^\s*\[\s*\n([\s\S]*?)\n\s*\]\s*$/gm, (_, inner) => `$$\n${inner.trim()}\n$$`)
-        // Single-line [ \expr ]
+        // Convert multi-line [ ... ] display math blocks — put on one line so marked doesn't split them
+        // Handles:  [\ny = \sin(x)\n]  →  $$y = \sin(x)$$
+        md = md.replace(/^\s*\[\s*\n([\s\S]*?)\n\s*\]\s*$/gm, (_, inner) => `$$${inner.trim()}$$`)
+        // Single-line [ \expr ]  →  $$\expr$$
         md = md.replace(/^\s*\[\s*(.*?\\.*?)\s*\]\s*$/gm, (_, inner) => `$$${inner.trim()}$$`)
-        // Inline math in parens: (\frac{\pi}{2}) or (\sin x) — only when containing a backslash
+        // Inline math in parens: (\frac{\pi}{2}) — only when containing a backslash
         md = md.replace(/\(([^()]*\\[^()]*)\)/g, (_, inner) => `$${inner.trim()}$`)
         return md
     }
