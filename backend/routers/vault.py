@@ -35,30 +35,41 @@ class FileListItem(BaseModel):
     size: int | None = None
 
 
-# ── List all files for the current user ──────────────────────────────────────
+# ── List all files for the current user (recursive) ──────────────────────────
 
 @router.get("/files", response_model=list[FileListItem])
 async def list_files(current_user: dict = Depends(get_current_user)):
     supabase = get_supabase()
     user_id = current_user["user_id"]
-    prefix = f"{user_id}/"
+    root_prefix = f"{user_id}/"
 
-    try:
-        items = supabase.storage.from_(BUCKET).list(prefix, {"limit": 1000, "offset": 0})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Storage error: {e}")
+    def list_recursive(prefix: str) -> list[FileListItem]:
+        """List all files recursively under prefix, returning paths relative to root_prefix."""
+        try:
+            items = supabase.storage.from_(BUCKET).list(prefix, {"limit": 1000, "offset": 0})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Storage error: {e}")
 
-    result = []
-    for item in items:
-        name = item.get("name", "")
-        if not name:
-            continue
-        result.append(FileListItem(
-            path=name.removeprefix(prefix),
-            updated_at=item.get("updated_at"),
-            size=item.get("metadata", {}).get("size") if item.get("metadata") else None,
-        ))
-    return result
+        result = []
+        for item in items:
+            name = item.get("name", "")
+            if not name:
+                continue
+            full_path = f"{prefix}{name}"
+            # Supabase returns folders as items with id=None and no metadata
+            is_folder = item.get("id") is None and item.get("metadata") is None
+            if is_folder:
+                # Recurse into subfolder
+                result.extend(list_recursive(f"{full_path}/"))
+            else:
+                result.append(FileListItem(
+                    path=full_path.removeprefix(root_prefix),
+                    updated_at=item.get("updated_at"),
+                    size=item.get("metadata", {}).get("size") if item.get("metadata") else None,
+                ))
+        return result
+
+    return list_recursive(root_prefix)
 
 
 # ── Read a single file ────────────────────────────────────────────────────────
