@@ -1,6 +1,8 @@
 // src/app.js
 import { foldersAPI, filesAPI, auth } from './api.js'
 
+const EDITOR_MODE_KEY = 'nc_editor_mode'
+
 export class ThoughtCollector {
     constructor(containerEl, onLogout) {
         this.container = containerEl
@@ -10,8 +12,17 @@ export class ThoughtCollector {
         this.currentFolder = null
         this.currentFile = null
         this.editorDirty = false
+        // editorMode: 'split' | 'edit' | 'preview'
+        // On mobile we force 'edit', on desktop persist preference
+        this.editorMode = this._isMobile()
+            ? 'edit'
+            : (localStorage.getItem(EDITOR_MODE_KEY) || 'split')
 
         this._render()
+    }
+
+    _isMobile() {
+        return window.innerWidth <= 768
     }
 
     // ── Top-level render dispatcher ───────────────────────────
@@ -298,9 +309,21 @@ export class ThoughtCollector {
     _renderEditor() {
         const file = this.currentFile
         const folder = this.currentFolder
+        const mode = this._isMobile() ? 'edit' : this.editorMode
+
+        // Mode toggle buttons — hide SPLIT on mobile
+        const modeButtons = `
+            <div class="mode-toggle" id="mode-toggle">
+                ${!this._isMobile() ? `
+                <button class="mode-btn ${mode === 'split' ? 'active' : ''}" data-mode="split" title="Split view">⬜</button>
+                ` : ''}
+                <button class="mode-btn ${mode === 'edit' ? 'active' : ''}" data-mode="edit" title="Edit only">✎</button>
+                <button class="mode-btn ${mode === 'preview' ? 'active' : ''}" data-mode="preview" title="Preview only">👁</button>
+            </div>
+        `
 
         const body = `
-            <div class="editor-zone">
+            <div class="editor-zone" data-mode="${mode}" id="editor-zone">
                 <div class="editor-toolbar">
                     <input
                         type="text"
@@ -310,6 +333,7 @@ export class ThoughtCollector {
                         placeholder="File title..."
                     />
                     <div class="editor-actions">
+                        ${modeButtons}
                         <span class="save-status" id="save-status"></span>
                         <button class="cyber-btn compact-btn" id="save-btn">
                             <span class="btn-text">SAVE</span>
@@ -317,11 +341,19 @@ export class ThoughtCollector {
                         </button>
                     </div>
                 </div>
-                <textarea
-                    id="file-content"
-                    class="cyber-textarea editor-textarea"
-                    placeholder="> write your thoughts here_"
-                ></textarea>
+                <div class="editor-body">
+                    <div class="editor-pane">
+                        <textarea
+                            id="file-content"
+                            class="cyber-textarea editor-textarea"
+                            placeholder="> write your thoughts here_"
+                        ></textarea>
+                    </div>
+                    <div class="editor-divider"></div>
+                    <div class="preview-pane">
+                        <div class="editor-preview" id="editor-preview"></div>
+                    </div>
+                </div>
                 <div class="editor-footer">
                     <span class="char-count" id="char-count">${(file.content || '').length} chars</span>
                 </div>
@@ -341,9 +373,28 @@ export class ThoughtCollector {
         const saveBtn     = this.container.querySelector('#save-btn')
         const saveStatus  = this.container.querySelector('#save-status')
         const charCount   = this.container.querySelector('#char-count')
+        const preview     = this.container.querySelector('#editor-preview')
+        const editorZone  = this.container.querySelector('#editor-zone')
 
         // Set textarea value directly (avoids HTML encoding issues with innerHTML)
         contentArea.value = file.content || ''
+
+        // Initial preview render
+        this._renderPreview(preview, contentArea.value)
+
+        // Click preview to switch to edit mode
+        preview.addEventListener('click', () => {
+            if (editorZone.dataset.mode === 'preview') {
+                this._setEditorMode('edit', editorZone)
+            }
+        })
+
+        // Mode toggle buttons
+        this.container.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                this._setEditorMode(btn.dataset.mode, editorZone)
+            })
+        })
 
         this.container.querySelector('#back-to-folders').addEventListener('click', () => {
             if (this.editorDirty && !confirm('Unsaved changes. Leave anyway?')) return
@@ -368,10 +419,14 @@ export class ThoughtCollector {
             saveStatus.className = 'save-status unsaved'
         }
 
+        // Live preview update (debounced)
+        let previewTimer = null
         titleInput.addEventListener('input', markDirty)
         contentArea.addEventListener('input', () => {
             markDirty()
             charCount.textContent = `${contentArea.value.length} chars`
+            clearTimeout(previewTimer)
+            previewTimer = setTimeout(() => this._renderPreview(preview, contentArea.value), 100)
         })
 
         const doSave = () => {
@@ -404,6 +459,39 @@ export class ThoughtCollector {
         }
         contentArea.addEventListener('keydown', handleSaveKey)
         titleInput.addEventListener('keydown', handleSaveKey)
+    }
+
+    _renderPreview(previewEl, markdown) {
+        if (typeof marked !== 'undefined') {
+            previewEl.innerHTML = marked.parse(markdown || '')
+        } else {
+            // fallback: show raw text
+            previewEl.textContent = markdown || ''
+        }
+    }
+
+    _setEditorMode(mode, editorZone) {
+        // Ignore split on mobile
+        if (mode === 'split' && this._isMobile()) mode = 'edit'
+        this.editorMode = mode
+        localStorage.setItem(EDITOR_MODE_KEY, mode)
+        if (!editorZone) return
+        editorZone.dataset.mode = mode
+        // Update active button highlight
+        editorZone.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.mode === mode)
+        })
+        // If switching to preview, focus the preview pane
+        if (mode === 'preview') {
+            const contentArea = editorZone.querySelector('#file-content')
+            const preview = editorZone.querySelector('#editor-preview')
+            if (contentArea && preview) this._renderPreview(preview, contentArea.value)
+        }
+        // If switching to edit, focus textarea
+        if (mode === 'edit') {
+            const contentArea = editorZone.querySelector('#file-content')
+            if (contentArea) setTimeout(() => contentArea.focus(), 50)
+        }
     }
 
     // ── Utilities ─────────────────────────────────────────────
