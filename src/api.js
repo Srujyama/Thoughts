@@ -322,9 +322,13 @@ export const foldersAPI = {
         }
         collect(folderId)
 
-        // Delete all files from cloud
+        // Delete all files and .keep markers from cloud
         const allFiles = toDelete.flatMap(f => f.files)
-        await Promise.all(allFiles.map(f => vaultAPI.deleteFile(f.path).catch(() => {})))
+        const keepMarkers = toDelete.map(f => f.path + '/.keep')
+        await Promise.all([
+            ...allFiles.map(f => vaultAPI.deleteFile(f.path).catch(() => {})),
+            ...keepMarkers.map(p => vaultAPI.deleteFile(p).catch(() => {})),
+        ])
 
         const deleteIds = new Set(toDelete.map(f => f.id))
         meta.folders = meta.folders.filter(f => !deleteIds.has(f.id))
