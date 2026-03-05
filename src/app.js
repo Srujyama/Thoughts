@@ -13,18 +13,30 @@ const THEMES = [
 ]
 
 // ── Hash routing helpers ──────────────────────────────────────
-// Scheme: #/  |  #/folder-slug  |  #/folder-slug/file-id
-function pushHash(parts) {
-    const hash = parts.length ? '#/' + parts.join('/') : '#/'
+// Scheme: #/  |  #/folder/path  |  #/folder/path//file-id
+// We use "//" as separator between folder path and file id to support
+// nested folder paths that already contain "/"
+function pushHash(folderPath, fileId) {
+    let hash
+    if (!folderPath) {
+        hash = '#/'
+    } else if (!fileId) {
+        hash = '#/' + folderPath
+    } else {
+        hash = '#/' + folderPath + '//' + fileId
+    }
     if (location.hash !== hash) history.pushState(null, '', hash)
 }
 
 function readHash() {
-    // Returns { folderSlug, fileId } or nulls
     const raw = location.hash.replace(/^#\/?/, '')
-    if (!raw) return { folderSlug: null, fileId: null }
-    const [folderSlug, fileId] = raw.split('/')
-    return { folderSlug: folderSlug || null, fileId: fileId || null }
+    if (!raw) return { folderPath: null, fileId: null }
+    // Check for "//" separator (folder path // file id)
+    const sep = raw.indexOf('//')
+    if (sep !== -1) {
+        return { folderPath: raw.slice(0, sep) || null, fileId: raw.slice(sep + 2) || null }
+    }
+    return { folderPath: raw || null, fileId: null }
 }
 
 export class ThoughtCollector {
@@ -59,7 +71,12 @@ export class ThoughtCollector {
                     this.editorDirty = false
                     this._navigate('files')
                 } else if (this.view === 'files') {
-                    this._navigate('folders')
+                    // Go to parent folder, or root folders view
+                    const parent = this.currentFolder?.parentId
+                        ? foldersAPI.list().find(f => f.id === this.currentFolder.parentId)
+                        : null
+                    if (parent) this._navigate('files', { folder: parent })
+                    else this._navigate('folders')
                 }
             }
         }
@@ -85,22 +102,21 @@ export class ThoughtCollector {
         if (view === 'folders') {
             this.currentFolder = null
             this.currentFile   = null
-            pushHash([])
+            pushHash(null, null)
         } else if (view === 'files' && this.currentFolder) {
             this.currentFile = null
-            pushHash([this.currentFolder.slug])
+            pushHash(this.currentFolder.path, null)
         } else if (view === 'editor' && this.currentFolder && this.currentFile) {
-            pushHash([this.currentFolder.slug, this.currentFile.id])
+            pushHash(this.currentFolder.path, this.currentFile.id)
         }
         this._render()
     }
 
     _restoreFromHash() {
-        // Make sure meta is loaded first
-        const { folderSlug, fileId } = readHash()
-        const meta = foldersAPI.list()
+        const { folderPath, fileId } = readHash()
+        const allFolders = foldersAPI.list()
 
-        if (!folderSlug) {
+        if (!folderPath) {
             this.view = 'folders'
             this.currentFolder = null
             this.currentFile   = null
@@ -108,9 +124,8 @@ export class ThoughtCollector {
             return
         }
 
-        const folder = meta.find(f => f.slug === folderSlug)
+        const folder = allFolders.find(f => f.path === folderPath)
         if (!folder) {
-            // slug not yet in local cache — fall back to folders and sync
             this.view = 'folders'
             this._render()
             return
@@ -124,7 +139,6 @@ export class ThoughtCollector {
             return
         }
 
-        // Try to open the file
         const file = folder.files.find(f => f.id === fileId)
         if (!file) {
             this.view = 'files'
@@ -154,16 +168,8 @@ export class ThoughtCollector {
             ></button>
         `).join('')
 
-        // Build sidebar folder list
-        const allFolders = foldersAPI.list()
-        const sidebarItems = allFolders.map(f => `
-            <button class="sidebar-folder ${this.currentFolder?.id === f.id ? 'active' : ''}"
-                    data-folder-id="${f.id}" title="${this._esc(f.name)}">
-                <span class="sidebar-icon">▶</span>
-                <span class="sidebar-name">${this._esc(f.name)}</span>
-                <span class="sidebar-count">${f.files.length}</span>
-            </button>
-        `).join('')
+        // Build sidebar tree (root folders + indented children)
+        const sidebarHtml = this._buildSidebarTree(null, 0)
 
         const sidebarEl = sidebar ? `
             <nav class="app-sidebar" id="app-sidebar">
@@ -171,7 +177,7 @@ export class ThoughtCollector {
                     <span class="sidebar-title">FOLDERS</span>
                     <button class="sidebar-new-btn" id="sidebar-new-folder" title="New folder">+</button>
                 </div>
-                <div class="sidebar-list">${sidebarItems || '<p class="sidebar-empty">No folders yet</p>'}</div>
+                <div class="sidebar-list">${sidebarHtml || '<p class="sidebar-empty">No folders yet</p>'}</div>
             </nav>
         ` : ''
 
@@ -202,17 +208,67 @@ export class ThoughtCollector {
         `
     }
 
+    // Recursively build sidebar folder tree with indentation
+    _buildSidebarTree(parentId, depth) {
+        const children = parentId === null
+            ? foldersAPI.listRoots()
+            : foldersAPI.listChildren(parentId)
+        if (!children.length) return ''
+
+        return children.map(f => {
+            const isActive = this.currentFolder?.id === f.id
+            const subChildren = foldersAPI.listChildren(f.id)
+            const indent = depth * 12  // px indent per level
+            return `
+                <button class="sidebar-folder ${isActive ? 'active' : ''}"
+                        data-folder-id="${f.id}"
+                        style="padding-left: calc(0.75rem + ${indent}px)"
+                        title="${this._esc(f.path)}">
+                    <span class="sidebar-icon">${subChildren.length ? '▶' : '·'}</span>
+                    <span class="sidebar-name">${this._esc(f.name)}</span>
+                    <span class="sidebar-count">${f.files.length}</span>
+                </button>
+                ${this._buildSidebarTree(f.id, depth + 1)}
+            `
+        }).join('')
+    }
+
+    // Build ancestor chain for breadcrumb
+    _getAncestors(folder) {
+        const chain = []
+        let current = folder
+        while (current) {
+            chain.unshift(current)
+            current = current.parentId
+                ? foldersAPI.list().find(f => f.id === current.parentId)
+                : null
+        }
+        return chain
+    }
+
     _buildBreadcrumb() {
         if (this.view === 'folders') return ''
+
         if (this.view === 'files' && this.currentFolder) {
-            return `/ <span class="breadcrumb-current">${this._esc(this.currentFolder.name)}</span>`
+            const ancestors = this._getAncestors(this.currentFolder)
+            const parts = ancestors.map((f, i) => {
+                if (i === ancestors.length - 1) {
+                    return `<span class="breadcrumb-current">${this._esc(f.name)}</span>`
+                }
+                return `<button class="breadcrumb-link" data-folder-id="${f.id}">${this._esc(f.name)}</button>`
+            })
+            return '/ ' + parts.join(' / ')
         }
+
         if (this.view === 'editor' && this.currentFolder && this.currentFile) {
-            return `
-                / <button class="breadcrumb-link" id="bc-folder">${this._esc(this.currentFolder.name)}</button>
-                / <span class="breadcrumb-current">${this._esc(this.currentFile.title)}</span>
-            `
+            const ancestors = this._getAncestors(this.currentFolder)
+            const folderParts = ancestors.map(f =>
+                `<button class="breadcrumb-link" data-folder-id="${f.id}">${this._esc(f.name)}</button>`
+            )
+            return '/ ' + folderParts.join(' / ') +
+                ` / <span class="breadcrumb-current">${this._esc(this.currentFile.title)}</span>`
         }
+
         return ''
     }
 
@@ -238,18 +294,18 @@ export class ThoughtCollector {
             this._navigate('folders')
         })
 
-        // Breadcrumb folder link (editor view)
-        const bcFolder = this.container.querySelector('#bc-folder')
-        if (bcFolder) {
-            bcFolder.addEventListener('click', async () => {
+        // Breadcrumb folder links (any depth)
+        this.container.querySelectorAll('.breadcrumb-link[data-folder-id]').forEach(btn => {
+            btn.addEventListener('click', async () => {
                 if (this.editorDirty) {
                     const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                     if (!ok) return
                 }
                 this.editorDirty = false
-                this._navigate('files')
+                const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
+                if (folder) this._navigate('files', { folder })
             })
-        }
+        })
 
         // Theme picker
         this.container.querySelectorAll('.theme-swatch').forEach(btn => {
@@ -274,20 +330,20 @@ export class ThoughtCollector {
             })
         })
 
-        // Sidebar new folder button
+        // Sidebar new root folder button
         const sidebarNewBtn = this.container.querySelector('#sidebar-new-folder')
         if (sidebarNewBtn) {
-            sidebarNewBtn.addEventListener('click', () => this._promptNewFolder())
+            sidebarNewBtn.addEventListener('click', () => this._promptNewFolder(null))
         }
     }
 
-    // ── Folders view ──────────────────────────────────────────
+    // ── Folders view (root level) ──────────────────────────────
     _renderFolders() {
-        pushHash([])
-        const folders = foldersAPI.list()
+        pushHash(null, null)
+        const folders = foldersAPI.listRoots()
         this._paintFolders(folders)
         const doSync = () => foldersAPI.listFromCloud()
-            .then(updated => { if (this.view === 'folders') this._paintFolders(updated) })
+            .then(() => { if (this.view === 'folders') this._paintFolders(foldersAPI.listRoots()) })
         doSync().catch(() => setTimeout(() => doSync().catch(() => {}), 5000))
     }
 
@@ -326,7 +382,7 @@ export class ThoughtCollector {
         this._bindShell()
 
         this.container.querySelector('#new-folder-btn').addEventListener('click', () => {
-            this._promptNewFolder()
+            this._promptNewFolder(null)
         })
 
         this.container.querySelectorAll('.folder-card').forEach((card) => {
@@ -352,11 +408,12 @@ export class ThoughtCollector {
         })
     }
 
-    async _promptNewFolder() {
-        const name = await this._showModal({ type: 'input', title: 'NEW FOLDER', placeholder: 'Folder name...' })
+    async _promptNewFolder(parentId) {
+        const title = parentId ? 'NEW SUBFOLDER' : 'NEW FOLDER'
+        const name = await this._showModal({ type: 'input', title, placeholder: 'Folder name...' })
         if (!name) return
         try {
-            await foldersAPI.create(name)
+            await foldersAPI.create(name, parentId)
             this._render()
         } catch (err) {
             this._toast(`> ERROR: ${err.message}`)
@@ -379,68 +436,118 @@ export class ThoughtCollector {
     async _deleteFolder(id) {
         const folder = foldersAPI.list().find((f) => f.id === id)
         if (!folder) return
-        const ok = await this._showModal({ type: 'confirm', title: 'DELETE FOLDER', message: `Delete "${folder.name}" and all its files?` })
+        const childCount = foldersAPI.listChildren(id).length
+        const msg = childCount
+            ? `Delete "${folder.name}", all its subfolders, and all files?`
+            : `Delete "${folder.name}" and all its files?`
+        const ok = await this._showModal({ type: 'confirm', title: 'DELETE FOLDER', message: msg })
         if (!ok) return
         foldersAPI.delete(id)
-            .then(() => { if (this.view === 'folders') this._render() })
+            .then(() => { this._render() })
             .catch(err => this._toast(`> DELETE ERROR: ${err.message}`))
     }
 
-    // ── Files view ────────────────────────────────────────────
+    // ── Files view (shows subfolders + files) ──────────────────
     _renderFiles() {
         this.currentFolder = foldersAPI.list().find((f) => f.id === this.currentFolder.id)
         if (!this.currentFolder) { this._navigate('folders'); return }
-        pushHash([this.currentFolder.slug])
-        this._paintFiles(this.currentFolder.files)
+        pushHash(this.currentFolder.path, null)
+        this._paintFiles()
     }
 
-    _paintFiles(files) {
+    _paintFiles() {
         const folder = this.currentFolder
+        const subfolders = foldersAPI.listChildren(folder.id)
+        const files = folder.files
 
-        const fileCards = files.length
-            ? files.map((f) => `
-                <div class="file-card" data-id="${f.id}">
-                    <div class="file-icon">#</div>
-                    <div class="file-info">
-                        <span class="file-title">${this._esc(f.title)}</span>
-                        <span class="file-meta">// ${this._relTime(f.updated_at)}</span>
-                    </div>
-                    <div class="file-actions">
-                        <button class="icon-btn delete-file-btn" data-id="${f.id}" title="Delete">x</button>
-                    </div>
+        // Subfolder cards
+        const subfolderCards = subfolders.map(f => `
+            <div class="folder-card subfolder-card" data-id="${f.id}">
+                <div class="folder-icon">▶</div>
+                <div class="folder-info">
+                    <span class="folder-name">${this._esc(f.name)}</span>
+                    <span class="folder-meta">${f.files.length} file${f.files.length !== 1 ? 's' : ''}</span>
                 </div>
-            `).join('')
-            : `<div class="empty-state">
-                <p class="blink">> NO FILES IN THIS FOLDER_</p>
-                <p class="empty-sub">// CREATE OR UPLOAD A FILE TO BEGIN</p>
+                <div class="folder-actions">
+                    <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename">rn</button>
+                    <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete">x</button>
+                </div>
+            </div>
+        `).join('')
+
+        // File cards
+        const fileCards = files.map((f) => `
+            <div class="file-card" data-id="${f.id}">
+                <div class="file-icon">#</div>
+                <div class="file-info">
+                    <span class="file-title">${this._esc(f.title)}</span>
+                    <span class="file-meta">// ${this._relTime(f.updated_at)}</span>
+                </div>
+                <div class="file-actions">
+                    <button class="icon-btn delete-file-btn" data-id="${f.id}" title="Delete">x</button>
+                </div>
+            </div>
+        `).join('')
+
+        const isEmpty = !subfolders.length && !files.length
+        const contentHtml = isEmpty
+            ? `<div class="empty-state">
+                <p class="blink">> EMPTY FOLDER_</p>
+                <p class="empty-sub">// CREATE A FILE OR SUBFOLDER TO BEGIN</p>
                </div>`
+            : (subfolderCards + fileCards)
 
         const body = `
             <div class="toolbar">
                 <span class="section-label">// ${this._esc(folder.name).toUpperCase()}</span>
                 <div class="toolbar-actions">
-                    <button class="cyber-btn compact-btn" id="upload-md-btn" title="Upload .md file">
+                    <button class="cyber-btn compact-btn" id="upload-folder-btn" title="Upload folder of .md files">
+                        <span class="btn-text">↑ UPLOAD FOLDER</span>
+                        <span class="btn-glow"></span>
+                    </button>
+                    <input type="file" id="folder-file-input" webkitdirectory multiple style="display:none">
+                    <button class="cyber-btn compact-btn" id="upload-md-btn" title="Upload .md files">
                         <span class="btn-text">↑ UPLOAD .MD</span>
                         <span class="btn-glow"></span>
                     </button>
                     <input type="file" id="md-file-input" accept=".md,text/markdown" multiple style="display:none">
+                    <button class="cyber-btn compact-btn" id="new-subfolder-btn">
+                        <span class="btn-text">+ SUBFOLDER</span>
+                        <span class="btn-glow"></span>
+                    </button>
                     <button class="cyber-btn compact-btn" id="new-file-btn">
                         <span class="btn-text">+ NEW FILE</span>
                         <span class="btn-glow"></span>
                     </button>
                 </div>
             </div>
-            <div class="file-list" id="file-list">${fileCards}</div>
+            <div class="file-list" id="file-list">${contentHtml}</div>
         `
 
         this.container.innerHTML = this._shell(body)
         this._bindShell()
 
-        // Upload .md
-        const uploadBtn  = this.container.querySelector('#upload-md-btn')
-        const fileInput  = this.container.querySelector('#md-file-input')
+        // Upload folder
+        const uploadFolderBtn = this.container.querySelector('#upload-folder-btn')
+        const folderFileInput = this.container.querySelector('#folder-file-input')
+        uploadFolderBtn.addEventListener('click', () => folderFileInput.click())
+        folderFileInput.addEventListener('change', () => this._handleFolderUpload(folderFileInput))
+
+        // Upload .md files
+        const uploadBtn = this.container.querySelector('#upload-md-btn')
+        const fileInput = this.container.querySelector('#md-file-input')
         uploadBtn.addEventListener('click', () => fileInput.click())
         fileInput.addEventListener('change', () => this._handleMdUpload(fileInput))
+
+        // New subfolder
+        this.container.querySelector('#new-subfolder-btn').addEventListener('click', () => {
+            this._promptNewFolder(folder.id)
+        })
+
+        // New file
+        this.container.querySelector('#new-file-btn').addEventListener('click', () => {
+            this._promptNewFile()
+        })
 
         // Drag-and-drop on the file list
         const fileList = this.container.querySelector('#file-list')
@@ -451,15 +558,35 @@ export class ThoughtCollector {
             fileList.classList.remove('drag-over')
             const dt = e.dataTransfer
             if (dt?.files?.length) {
-                const fakeInput = { files: Array.from(dt.files).filter(f => f.name.endsWith('.md')) }
-                if (fakeInput.files.length) this._handleMdUpload(fakeInput)
+                const mdFiles = Array.from(dt.files).filter(f => f.name.endsWith('.md'))
+                if (mdFiles.length) this._handleMdUpload({ files: mdFiles })
             }
         })
 
-        this.container.querySelector('#new-file-btn').addEventListener('click', () => {
-            this._promptNewFile()
+        // Subfolder card clicks
+        this.container.querySelectorAll('.subfolder-card').forEach((card) => {
+            card.addEventListener('click', (e) => {
+                if (e.target.closest('.folder-actions')) return
+                const sub = foldersAPI.list().find((f) => f.id === card.dataset.id)
+                if (sub) this._navigate('files', { folder: sub })
+            })
         })
 
+        this.container.querySelectorAll('.rename-folder-btn').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                this._renameFolder(btn.dataset.id)
+            })
+        })
+
+        this.container.querySelectorAll('.delete-folder-btn').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                this._deleteFolder(btn.dataset.id)
+            })
+        })
+
+        // File card clicks
         this.container.querySelectorAll('.file-card').forEach((card) => {
             card.addEventListener('click', (e) => {
                 if (e.target.closest('.file-actions')) return
@@ -476,9 +603,9 @@ export class ThoughtCollector {
         })
     }
 
-    // ── .md upload ────────────────────────────────────────────
+    // ── .md file upload ───────────────────────────────────────
     async _handleMdUpload(input) {
-        const files = Array.from(input.files || [])
+        const files = Array.from(input.files || []).filter(f => f.name.endsWith('.md'))
         if (!files.length) return
 
         let succeeded = 0
@@ -497,7 +624,71 @@ export class ThoughtCollector {
             this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
             this._render()
         }
-        // Reset input so re-uploading same file works
+        if (input.value !== undefined) input.value = ''
+    }
+
+    // ── Folder upload (webkitdirectory) ───────────────────────
+    // Reads all .md files from the selected directory tree.
+    // Recreates the subfolder structure under the current folder.
+    async _handleFolderUpload(input) {
+        const allFiles = Array.from(input.files || [])
+        // Filter to .md only — skip images and other files
+        const mdFiles = allFiles.filter(f => f.name.endsWith('.md'))
+        if (!mdFiles.length) {
+            this._toast('> NO .MD FILES FOUND IN FOLDER')
+            if (input.value !== undefined) input.value = ''
+            return
+        }
+
+        // Show progress toast
+        this._toast(`> UPLOADING ${mdFiles.length} FILE${mdFiles.length !== 1 ? 'S' : ''}...`)
+
+        let succeeded = 0
+        let errors = 0
+
+        for (const f of mdFiles) {
+            try {
+                // f.webkitRelativePath = "FolderName/sub/file.md"
+                // We strip the top-level folder name (it becomes the current folder)
+                // and treat everything else as subpath
+                const relPath = f.webkitRelativePath || f.name
+                const parts = relPath.split('/')
+
+                // parts[0] is the selected folder name — skip it, we're already inside currentFolder
+                // parts[1..n-1] are subfolder names, parts[n] is the filename
+                const subParts = parts.slice(1)   // drop the top-level folder name
+                const fileName = subParts[subParts.length - 1]
+                const subFolderParts = subParts.slice(0, -1)  // any intermediate subfolders
+
+                // Find or create the target folder
+                let targetFolder = this.currentFolder
+                for (const seg of subFolderParts) {
+                    if (!seg) continue
+                    // Look for an existing child with this name
+                    let child = foldersAPI.listChildren(targetFolder.id)
+                        .find(c => c.name.toLowerCase() === seg.toLowerCase()
+                                || c.path.endsWith('/' + seg.toLowerCase().replace(/\s+/g, '-')))
+                    if (!child) {
+                        child = await foldersAPI.create(seg, targetFolder.id)
+                    }
+                    targetFolder = foldersAPI.list().find(x => x.id === child.id) || child
+                }
+
+                const content = await f.text()
+                const title   = fileName.replace(/\.md$/i, '').replace(/-/g, ' ')
+                await filesAPI.create(targetFolder.id, title, content)
+                succeeded++
+            } catch (err) {
+                errors++
+                this._toast(`> ERROR: ${f.name}: ${err.message}`)
+            }
+        }
+
+        if (succeeded) {
+            this._toast(`> UPLOADED ${succeeded} FILE${succeeded > 1 ? 'S' : ''}${errors ? `, ${errors} FAILED` : ''}`)
+            this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
+            this._render()
+        }
         if (input.value !== undefined) input.value = ''
     }
 
@@ -527,7 +718,7 @@ export class ThoughtCollector {
         this.currentFile = file
         this.view = 'editor'
         this.editorDirty = false
-        pushHash([this.currentFolder.slug, file.id])
+        pushHash(this.currentFolder.path, file.id)
 
         this.container.innerHTML = this._shell(this._loading('LOADING FILE'))
         this._bindShell()
