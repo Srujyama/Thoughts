@@ -854,9 +854,16 @@ export class ThoughtCollector {
     }
 
     _normaliseMath(md) {
-        // Convert standalone [ ... ] lines (ChatGPT-style display math) to $$...$$
-        // e.g.  "[ y = \sin(x) ]"  →  "$$y = \sin(x)$$"
-        md = md.replace(/^\s*\[\s*(\\[^[\]]+)\s*\]\s*$/gm, (_, inner) => `$$${inner.trim()}$$`)
+        // Convert multi-line [ ... ] display math blocks to $$...$$
+        // Handles both single-line "[ y = \sin(x) ]" and multi-line:
+        //   [
+        //   y = \sin(x)
+        //   ]
+        md = md.replace(/^\s*\[\s*\n([\s\S]*?)\n\s*\]\s*$/gm, (_, inner) => `$$\n${inner.trim()}\n$$`)
+        // Single-line [ \expr ]
+        md = md.replace(/^\s*\[\s*(.*?\\.*?)\s*\]\s*$/gm, (_, inner) => `$$${inner.trim()}$$`)
+        // Inline math in parens: (\frac{\pi}{2}) or (\sin x) — only when containing a backslash
+        md = md.replace(/\(([^()]*\\[^()]*)\)/g, (_, inner) => `$${inner.trim()}$`)
         return md
     }
 
