@@ -853,13 +853,21 @@ export class ThoughtCollector {
         titleInput.addEventListener('keydown', handleSaveKey)
     }
 
+    _normaliseMath(md) {
+        // Convert standalone [ ... ] lines (ChatGPT-style display math) to $$...$$
+        // e.g.  "[ y = \sin(x) ]"  →  "$$y = \sin(x)$$"
+        md = md.replace(/^\s*\[\s*(\\[^[\]]+)\s*\]\s*$/gm, (_, inner) => `$$${inner.trim()}$$`)
+        return md
+    }
+
     _renderPreview(previewEl, markdown) {
+        const normalised = this._normaliseMath(markdown || '')
         if (typeof marked !== 'undefined') {
-            previewEl.innerHTML = marked.parse(markdown || '')
+            previewEl.innerHTML = marked.parse(normalised)
         } else {
-            previewEl.textContent = markdown || ''
+            previewEl.textContent = normalised
         }
-        // Render math with KaTeX if available
+        // Render math with KaTeX
         if (typeof renderMathInElement !== 'undefined') {
             renderMathInElement(previewEl, {
                 delimiters: [
@@ -869,6 +877,7 @@ export class ThoughtCollector {
                     { left: '\\(', right: '\\)', display: false },
                 ],
                 throwOnError: false,
+                ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
             })
         }
     }
