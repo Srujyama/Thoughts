@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from models.schemas import SignupRequest, LoginRequest, AuthResponse
+from pydantic import BaseModel
 from supabase import create_client
 import os
 import httpx
@@ -61,6 +62,7 @@ async def signup(body: SignupRequest):
     data = login.json()
     return AuthResponse(
         access_token=data["access_token"],
+        refresh_token=data.get("refresh_token", ""),
         user_id=data["user"]["id"],
         email=data["user"]["email"],
     )
@@ -85,6 +87,35 @@ async def login(body: LoginRequest):
     data = res.json()
     return AuthResponse(
         access_token=data["access_token"],
+        refresh_token=data.get("refresh_token", ""),
+        user_id=data["user"]["id"],
+        email=data["user"]["email"],
+    )
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+@router.post("/refresh", response_model=AuthResponse)
+async def refresh(body: RefreshRequest):
+    url = SUPABASE_URL()
+    headers = _auth_headers()
+
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            f"{url}/auth/v1/token?grant_type=refresh_token",
+            headers=headers,
+            json={"refresh_token": body.refresh_token},
+        )
+
+    if res.status_code != 200:
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+
+    data = res.json()
+    return AuthResponse(
+        access_token=data["access_token"],
+        refresh_token=data.get("refresh_token", ""),
         user_id=data["user"]["id"],
         email=data["user"]["email"],
     )

@@ -1,13 +1,39 @@
 // src/api.js
 // All calls go to the FastAPI backend. JWT stored in localStorage.
 
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-const TOKEN_KEY = 'nc_token'
-const USER_KEY  = 'nc_user'
+const BASE_URL    = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const TOKEN_KEY   = 'nc_token'
+const REFRESH_KEY = 'nc_refresh_token'
+const USER_KEY    = 'nc_user'
+
+// ── Token refresh (runs at most once at a time) ───────────────
+let _refreshPromise = null
+
+async function _refreshToken() {
+    const refreshToken = localStorage.getItem(REFRESH_KEY)
+    if (!refreshToken) throw new Error('No refresh token — please log in again.')
+
+    const res = await fetch(`${BASE_URL}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+    })
+    if (!res.ok) {
+        // Refresh failed — clear auth so the app shows the login screen
+        localStorage.removeItem(TOKEN_KEY)
+        localStorage.removeItem(REFRESH_KEY)
+        localStorage.removeItem(USER_KEY)
+        throw new Error('Session expired. Please log in again.')
+    }
+    const data = await res.json()
+    localStorage.setItem(TOKEN_KEY, data.access_token)
+    if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
+    return data.access_token
+}
 
 // ── Internal fetch helper ─────────────────────────────────────
 
-async function apiFetch(path, options = {}) {
+async function apiFetch(path, options = {}, _retry = true) {
     const token = localStorage.getItem(TOKEN_KEY)
     const headers = { 'Content-Type': 'application/json', ...options.headers }
     if (token) headers['Authorization'] = `Bearer ${token}`
@@ -15,6 +41,13 @@ async function apiFetch(path, options = {}) {
     const res = await fetch(`${BASE_URL}${path}`, { ...options, headers })
 
     if (res.status === 204) return null
+
+    // Auto-refresh on 401 then retry once
+    if (res.status === 401 && _retry) {
+        if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
+        await _refreshPromise
+        return apiFetch(path, options, false)
+    }
 
     const data = await res.json().catch(() => null)
 
@@ -45,6 +78,7 @@ export const auth = {
             body: JSON.stringify({ email, password }),
         })
         localStorage.setItem(TOKEN_KEY, data.access_token)
+        if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
         localStorage.setItem(USER_KEY, JSON.stringify({ user_id: data.user_id, email: data.email }))
         return data
     },
@@ -55,6 +89,7 @@ export const auth = {
             body: JSON.stringify({ email, password }),
         })
         localStorage.setItem(TOKEN_KEY, data.access_token)
+        if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
         localStorage.setItem(USER_KEY, JSON.stringify({ user_id: data.user_id, email: data.email }))
         return data
     },
@@ -62,6 +97,7 @@ export const auth = {
     async logout() {
         try { await apiFetch('/auth/logout', { method: 'POST' }) } catch { /* no-op */ }
         localStorage.removeItem(TOKEN_KEY)
+        localStorage.removeItem(REFRESH_KEY)
         localStorage.removeItem(USER_KEY)
     },
 }
@@ -82,12 +118,23 @@ export const vaultAPI = {
     // Returns raw flat list: [{ path, updated_at, size }, ...]
     listFiles: () => apiFetch('/vault/files'),
 
-    // Returns file content as text
+    // Returns file content as text (goes through apiFetch for auto-refresh)
     async readFile(path) {
-        const token = localStorage.getItem(TOKEN_KEY)
-        const res = await fetch(`${BASE_URL}/vault/files/${path}`, {
-            headers: { Authorization: `Bearer ${token}` },
-        })
+        // apiFetch returns parsed JSON; for raw text we need to call the endpoint
+        // directly but still handle token refresh the same way.
+        const doRead = async () => {
+            const token = localStorage.getItem(TOKEN_KEY)
+            return fetch(`${BASE_URL}/vault/files/${path}`, {
+                headers: { Authorization: `Bearer ${token}` },
+            })
+        }
+        let res = await doRead()
+        if (res.status === 401) {
+            // Trigger a refresh (reuse the shared promise if already in progress)
+            if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
+            await _refreshPromise
+            res = await doRead()
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         return res.text()
     },
