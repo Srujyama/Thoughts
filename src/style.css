@@ -74,6 +74,8 @@
     --t-preview-th-bg:      var(--nc-bg-mid);
     --t-preview-th-color:   var(--nc-cyan);
     --t-preview-td-border:  rgba(255, 0, 60, 0.15);
+    --t-preview-border:     rgba(0, 245, 255, 0.08);
+    --t-preview-bg:         rgba(0, 0, 0, 0.18);
     --t-divider-color:      var(--nc-red-dim);
     --t-mode-toggle-border: var(--nc-red-dim);
     --t-mode-btn-active-bg: var(--nc-red);
@@ -149,6 +151,8 @@
     --t-preview-th-bg:      #f1f3f4;
     --t-preview-th-color:   #202124;
     --t-preview-td-border:  #dadce0;
+    --t-preview-border:     #dadce0;
+    --t-preview-bg:         #ffffff;
     --t-divider-color:      #dadce0;
     --t-mode-toggle-border: #dadce0;
     --t-mode-btn-active-bg: #1a73e8;
@@ -224,6 +228,8 @@
     --t-preview-th-bg:      #ede8de;
     --t-preview-th-color:   #1a1209;
     --t-preview-td-border:  #c9a98a;
+    --t-preview-border:     rgba(201, 169, 138, 0.3);
+    --t-preview-bg:         rgba(0, 0, 0, 0.06);
     --t-divider-color:      #c9a98a;
     --t-mode-toggle-border: #c9a98a;
     --t-mode-btn-active-bg: #5c4033;
@@ -299,6 +305,8 @@
     --t-preview-th-bg:      #434c5e;
     --t-preview-th-color:   #88c0d0;
     --t-preview-td-border:  #4c566a;
+    --t-preview-border:     rgba(76, 86, 106, 0.5);
+    --t-preview-bg:         rgba(0, 0, 0, 0.12);
     --t-divider-color:      #4c566a;
     --t-mode-toggle-border: #4c566a;
     --t-mode-btn-active-bg: #88c0d0;
@@ -374,6 +382,8 @@
     --t-preview-th-bg:      #e5dece;
     --t-preview-th-color:   #073642;
     --t-preview-td-border:  #cfc9b6;
+    --t-preview-border:     rgba(207, 201, 182, 0.4);
+    --t-preview-bg:         rgba(0, 0, 0, 0.05);
     --t-divider-color:      #cfc9b6;
     --t-mode-toggle-border: #cfc9b6;
     --t-mode-btn-active-bg: #cb4b16;
@@ -944,12 +954,15 @@ body {
 
 /* ── Markdown Preview Styling ────────────────────────────────── */
 .editor-preview {
-    padding: 1rem 1.5rem;
+    padding: 1.25rem 1.75rem;
     color: var(--nc-text);
     font-family: var(--t-font-editor);
     font-size: 0.95rem;
     line-height: 1.8;
     word-break: break-word;
+    border: 1px solid var(--t-preview-border, rgba(0, 245, 255, 0.08));
+    background: var(--t-preview-bg, rgba(0, 0, 0, 0.15));
+    border-radius: 2px;
 }
 
 .editor-preview h1,
@@ -1763,8 +1776,9 @@ body {
 }
 
 @media (max-width: 600px) {
+    /* Header */
     .app-header {
-        padding: 0.75rem 1rem;
+        padding: 0.6rem 1rem;
         gap: 0.5rem;
     }
 
@@ -1777,28 +1791,102 @@ body {
     }
 
     .glitch-text.small {
-        font-size: 1rem;
+        font-size: 0.95rem;
     }
 
+    /* Main content */
     .app-main {
-        padding: 1.5rem 1rem;
+        padding: 1rem 0.85rem;
+        gap: 1.25rem;
     }
 
+    /* Buttons — larger tap targets */
     .cyber-btn {
-        padding: 0.75rem 1.25rem;
+        padding: 0.7rem 1.1rem;
+        font-size: 0.78rem;
     }
 
+    /* Toast spans full width */
     .cyber-toast {
         bottom: 1rem;
-        right: 1rem;
-        left: 1rem;
+        right: 0.75rem;
+        left: 0.75rem;
         max-width: none;
     }
 
-    .toolbar-actions {
+    /* Editor toolbar — stack save/mode buttons below title */
+    .editor-toolbar {
         flex-direction: column;
-        align-items: flex-end;
-        gap: 0.35rem;
+        align-items: stretch;
+        gap: 0.5rem;
+    }
+
+    .editor-actions {
+        justify-content: space-between;
+    }
+
+    /* Mode toggle — hide split on mobile, stretch edit/preview */
+    .mode-btn[data-mode="split"] { display: none; }
+    .mode-toggle { flex: 1; justify-content: center; }
+    .mode-btn { flex: 1; text-align: center; padding: 0.45rem 0.5rem; }
+
+    /* Editor zone — use full screen height minus header */
+    .editor-zone {
+        height: calc(100dvh - 130px);
+    }
+
+    /* Preview — no extra padding waste on small screens */
+    .editor-preview {
+        padding: 1rem;
+        font-size: 0.9rem;
+    }
+
+    /* Toolbar actions (folder view) */
+    .toolbar-actions {
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+    }
+
+    /* Folder / file grids — single column */
+    .folder-grid,
+    .files-grid {
+        grid-template-columns: 1fr;
+    }
+
+    /* Cards — slightly more compact */
+    .folder-card,
+    .file-card {
+        padding: 0.85rem 1rem;
+    }
+
+    /* Thought input — smaller gap */
+    .input-zone {
+        padding: 1rem;
+    }
+
+    /* Thought cards */
+    .thought-card {
+        padding: 1rem 1rem 1rem 1.25rem;
+    }
+
+    /* Breadcrumb — wrap gracefully */
+    .breadcrumb {
+        font-size: 0.7rem;
+        flex-wrap: wrap;
+        gap: 0.2rem;
+    }
+
+    /* Page header titles */
+    .page-title {
+        font-size: 1.1rem;
+    }
+
+    /* Modal — full width on small screens */
+    .modal-box {
+        width: 95%;
+        padding: 1.5rem;
+        min-width: 0;
     }
 }
 
