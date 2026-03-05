@@ -592,6 +592,7 @@ body {
     display: flex;
     gap: 0.5rem;
     align-items: center;
+    flex-wrap: wrap;
 }
 
 .section-label {
@@ -1898,4 +1899,31 @@ body {
 .modal-btn.modal-confirm.danger:hover {
     background: var(--nc-red);
     color: var(--nc-bg-dark);
+}
+
+/* ── Subfolder cards (in files view) ─────────────────────── */
+.subfolder-card {
+    border-color: var(--t-card-border);
+}
+
+.subfolder-card:hover {
+    border-color: var(--t-card-hover-border);
+}
+
+/* Breadcrumb: support multi-segment paths */
+.breadcrumb-link {
+    background: none;
+    border: none;
+    color: var(--t-breadcrumb-color, var(--nc-cyan));
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    transition: opacity 0.15s;
+}
+
+.breadcrumb-link:hover {
+    opacity: 0.75;
 }

@@ -111,7 +111,7 @@ export const thoughtsAPI = {
 }
 
 // ── Vault / Files API ─────────────────────────────────────────
-// Files are stored as: {folder}/{title}.md
+// Files are stored as: {folderPath}/{title}.md  (folderPath can be nested: a/b/c)
 // Folder list is derived from the file paths returned by the API.
 
 export const vaultAPI = {
@@ -120,8 +120,6 @@ export const vaultAPI = {
 
     // Returns file content as text (goes through apiFetch for auto-refresh)
     async readFile(path) {
-        // apiFetch returns parsed JSON; for raw text we need to call the endpoint
-        // directly but still handle token refresh the same way.
         const doRead = async () => {
             const token = localStorage.getItem(TOKEN_KEY)
             return fetch(`${BASE_URL}/vault/files/${path}`, {
@@ -130,7 +128,6 @@ export const vaultAPI = {
         }
         let res = await doRead()
         if (res.status === 401) {
-            // Trigger a refresh (reuse the shared promise if already in progress)
             if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
             await _refreshPromise
             res = await doRead()
@@ -147,10 +144,13 @@ export const vaultAPI = {
     deleteFile: (path) => apiFetch(`/vault/files/${path}`, { method: 'DELETE' }),
 }
 
-// ── Folders + Files abstraction (maps vault paths → folder/file model) ────────
-// A "folder" is the first path segment. Files live at "{folder}/{slug}.md".
-// Folder and file metadata are kept in localStorage as lightweight cache
-// so UI state (IDs, display names) survives across renders without round-trips.
+// ── Folders + Files abstraction ────────────────────────────────
+// Meta structure (localStorage):
+//   { folders: [ { id, name, path, parentId|null, created_at, files: [...] }, ... ] }
+//
+// folder.path  = full slug path, e.g. "notes" or "notes/archive"
+// folder.parentId = id of parent folder, or null for root
+// file.path    = full storage path, e.g. "notes/archive/my-file.md"
 
 function metaKey() {
     const user = auth.getUser()
@@ -172,22 +172,63 @@ function slug(name) {
     return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || uid()
 }
 
+// Ensure a folder exists for each segment of a path, returning the leaf folder.
+// e.g. "notes/archive/2024" creates/finds folders for notes, notes/archive, notes/archive/2024
+function ensureFolderPath(folderPath, meta) {
+    const segments = folderPath.split('/')
+    let parentId = null
+    let currentPath = ''
+    let folder = null
+
+    for (const seg of segments) {
+        currentPath = currentPath ? `${currentPath}/${seg}` : seg
+        folder = meta.folders.find(f => f.path === currentPath)
+        if (!folder) {
+            folder = {
+                id: uid(),
+                name: seg.replace(/-/g, ' '),
+                path: currentPath,
+                parentId,
+                created_at: new Date().toISOString(),
+                files: [],
+            }
+            meta.folders.push(folder)
+        }
+        parentId = folder.id
+    }
+    return folder
+}
+
 // Merge a raw vault file list into the local folder/file meta cache
 function syncMetaFromCloud(rawFiles, meta) {
+    // Build a set of all known file paths
     const knownPaths = new Set()
     for (const folder of meta.folders) {
         for (const file of folder.files) knownPaths.add(file.path)
     }
 
+    // Migrate old-style folders (no .path field) to new style
+    for (const folder of meta.folders) {
+        if (!folder.path) {
+            folder.path = folder.slug || slug(folder.name)
+            folder.parentId = folder.parentId ?? null
+        }
+    }
+
     for (const item of rawFiles) {
         const path = item.path
-        if (!path || !path.includes('/')) continue          // skip root-level files
-            if (path.endsWith('/.keep')) continue               // skip folder markers
-        const [folderSlug, ...rest] = path.split('/')
-        const fileSlug = rest.join('/')
+        if (!path || !path.includes('/')) continue   // skip root-level files
+        if (path.endsWith('/.keep')) {
+            // Ensure the folder exists in meta even if it has no files yet
+            const folderPath = path.replace(/\/\.keep$/, '')
+            ensureFolderPath(folderPath, meta)
+            continue
+        }
+        // Only process .md files
+        if (!path.endsWith('.md')) continue
 
         if (knownPaths.has(path)) {
-            // update timestamps from cloud
+            // Update timestamps from cloud
             for (const folder of meta.folders) {
                 const file = folder.files.find(f => f.path === path)
                 if (file) { file.updated_at = item.updated_at || file.updated_at; break }
@@ -195,15 +236,15 @@ function syncMetaFromCloud(rawFiles, meta) {
             continue
         }
 
-        // New file from cloud — insert into meta
-        let folder = meta.folders.find(f => f.slug === folderSlug)
-        if (!folder) {
-            folder = { id: uid(), name: folderSlug, slug: folderSlug, created_at: new Date().toISOString(), files: [] }
-            meta.folders.push(folder)
-        }
+        // New file from cloud — determine its folder (all segments except last)
+        const parts = path.split('/')
+        const fileName = parts[parts.length - 1]
+        const folderPath = parts.slice(0, -1).join('/')
+
+        const folder = ensureFolderPath(folderPath, meta)
         folder.files.unshift({
             id: uid(),
-            title: fileSlug.replace(/\.md$/, '').replace(/-/g, ' '),
+            title: fileName.replace(/\.md$/, '').replace(/-/g, ' '),
             path,
             content: '',
             contentLoaded: false,
@@ -212,8 +253,6 @@ function syncMetaFromCloud(rawFiles, meta) {
         })
     }
 
-    // Never remove local-only files or folders — cloud sync only adds, never deletes local state
-    // Deletion is handled explicitly by the user via the delete button
     return meta
 }
 
@@ -230,19 +269,34 @@ export const foldersAPI = {
         return loadMeta().folders
     },
 
-    async create(name) {
+    // Returns only root-level folders (no parent)
+    listRoots() {
+        return loadMeta().folders.filter(f => !f.parentId)
+    },
+
+    // Returns direct children of a folder
+    listChildren(parentId) {
+        return loadMeta().folders.filter(f => f.parentId === parentId)
+    },
+
+    async create(name, parentId = null) {
         const meta = loadMeta()
+        const parent = parentId ? meta.folders.find(f => f.id === parentId) : null
+        const folderSlug = slug(name)
+        const folderPath = parent ? `${parent.path}/${folderSlug}` : folderSlug
+
         const folder = {
             id: uid(),
             name: name.trim(),
-            slug: slug(name),
+            path: folderPath,
+            parentId: parentId || null,
             created_at: new Date().toISOString(),
             files: [],
         }
         meta.folders.push(folder)
         saveMeta(meta)
-        // Persist folder to cloud so it syncs across devices
-        await vaultAPI.writeFile(folder.slug + '/.keep', '')
+        // Persist folder marker to cloud
+        await vaultAPI.writeFile(folderPath + '/.keep', '')
         return folder
     },
 
@@ -251,18 +305,29 @@ export const foldersAPI = {
         const folder = meta.folders.find(f => f.id === folderId)
         if (!folder) throw new Error('Folder not found')
         folder.name = newName.trim()
-        // Note: renaming a folder slug would require moving all cloud files — keep slug stable
+        // Note: renaming path would require moving all cloud files — keep path stable
         saveMeta(meta)
         return folder
     },
 
     async delete(folderId) {
         const meta = loadMeta()
-        const folder = meta.folders.find(f => f.id === folderId)
-        if (!folder) return
+        // Collect this folder and all descendants
+        const toDelete = []
+        const collect = (id) => {
+            const f = meta.folders.find(x => x.id === id)
+            if (!f) return
+            toDelete.push(f)
+            meta.folders.filter(x => x.parentId === id).forEach(child => collect(child.id))
+        }
+        collect(folderId)
+
         // Delete all files from cloud
-        await Promise.all(folder.files.map(f => vaultAPI.deleteFile(f.path).catch(() => {})))
-        meta.folders = meta.folders.filter(f => f.id !== folderId)
+        const allFiles = toDelete.flatMap(f => f.files)
+        await Promise.all(allFiles.map(f => vaultAPI.deleteFile(f.path).catch(() => {})))
+
+        const deleteIds = new Set(toDelete.map(f => f.id))
+        meta.folders = meta.folders.filter(f => !deleteIds.has(f.id))
         saveMeta(meta)
     },
 }
@@ -280,7 +345,7 @@ export const filesAPI = {
         if (!folder) throw new Error('Folder not found')
 
         const fileSlug = slug(title) + '.md'
-        const path = `${folder.slug}/${fileSlug}`
+        const path = `${folder.path}/${fileSlug}`
 
         await vaultAPI.writeFile(path, content)
 
