@@ -859,6 +859,18 @@ export class ThoughtCollector {
         } else {
             previewEl.textContent = markdown || ''
         }
+        // Render math with KaTeX if available
+        if (typeof renderMathInElement !== 'undefined') {
+            renderMathInElement(previewEl, {
+                delimiters: [
+                    { left: '$$', right: '$$', display: true },
+                    { left: '$',  right: '$',  display: false },
+                    { left: '\\[', right: '\\]', display: true },
+                    { left: '\\(', right: '\\)', display: false },
+                ],
+                throwOnError: false,
+            })
+        }
     }
 
     _setEditorMode(mode, editorZone) {
