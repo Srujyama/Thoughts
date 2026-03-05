@@ -59,12 +59,12 @@ export class ThoughtCollector {
         const folders = foldersAPI.list()
         this._paintFolders(folders)
 
-        // Background sync with cloud
-        foldersAPI.listFromCloud()
+        // Background sync with cloud (retry once on network errors / cold starts)
+        const doSync = () => foldersAPI.listFromCloud()
             .then(updated => {
                 if (this.view === 'folders') this._paintFolders(updated)
             })
-            .catch(err => this._toast(`> SYNC ERROR: ${err.message}`))
+        doSync().catch(() => setTimeout(() => doSync().catch(() => {}), 5000))
     }
 
     _paintFolders(folders) {
