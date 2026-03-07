@@ -1,10 +1,15 @@
 // src/app.js
 import { foldersAPI, filesAPI, auth } from './api.js'
 
-const EDITOR_MODE_KEY = 'nc_editor_mode'
-const THEME_KEY       = 'nc_theme'
+const EDITOR_MODE_KEY  = 'nc_editor_mode'
+const THEME_KEY        = 'nc_theme'
+const AUTOSAVE_KEY     = 'nc_autosave'
+const SIDEBAR_OPEN_KEY = 'nc_sidebar_open'
 
 const THEMES = [
+    { id: 'system',     label: 'System' },
+    { id: 'light',      label: 'Light' },
+    { id: 'dark',       label: 'Dark' },
     { id: 'cyberpunk',  label: 'Cyberpunk' },
     { id: 'docs',       label: 'Docs' },
     { id: 'typewriter', label: 'Typewriter' },
@@ -12,10 +17,14 @@ const THEMES = [
     { id: 'solarized',  label: 'Solarized' },
 ]
 
+// ── System theme media query watcher ──────────────────────────
+let _systemThemeListener = null
+
+function _resolveSystemTheme() {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
 // ── Hash routing helpers ──────────────────────────────────────
-// Scheme: #/  |  #/folder/path  |  #/folder/path//file-id
-// We use "//" as separator between folder path and file id to support
-// nested folder paths that already contain "/"
 function pushHash(folderPath, fileId) {
     let hash
     if (!folderPath) {
@@ -31,7 +40,6 @@ function pushHash(folderPath, fileId) {
 function readHash() {
     const raw = location.hash.replace(/^#\/?/, '')
     if (!raw) return { folderPath: null, fileId: null }
-    // Check for "//" separator (folder path // file id)
     const sep = raw.indexOf('//')
     if (sep !== -1) {
         return { folderPath: raw.slice(0, sep) || null, fileId: raw.slice(sep + 2) || null }
@@ -50,17 +58,18 @@ export class ThoughtCollector {
         this.editorMode = this._isMobile()
             ? 'edit'
             : (localStorage.getItem(EDITOR_MODE_KEY) || 'split')
+        this.autosave = localStorage.getItem(AUTOSAVE_KEY) === 'true'
+        this._autosaveTimer = null
+        // Track which sidebar folders are collapsed (set of folder ids)
+        this._collapsedFolders = new Set(JSON.parse(localStorage.getItem(SIDEBAR_OPEN_KEY) || '[]'))
 
-        // Apply saved theme (default: typewriter)
-        this._applyTheme(localStorage.getItem(THEME_KEY) || 'typewriter')
+        // Apply saved theme (default: system)
+        const savedTheme = localStorage.getItem(THEME_KEY) || 'system'
+        this._applyTheme(savedTheme)
 
-        // Restore position from hash, then render
         this._restoreFromHash()
-
-        // Browser back/forward
         window.addEventListener('popstate', () => this._restoreFromHash())
 
-        // Keyboard shortcuts: Escape to navigate back
         this._escHandler = async (e) => {
             if (e.key === 'Escape') {
                 if (this.view === 'editor') {
@@ -71,7 +80,6 @@ export class ThoughtCollector {
                     this.editorDirty = false
                     this._navigate('files')
                 } else if (this.view === 'files') {
-                    // Go to parent folder, or root folders view
                     const parent = this.currentFolder?.parentId
                         ? foldersAPI.list().find(f => f.id === this.currentFolder.parentId)
                         : null
@@ -87,8 +95,30 @@ export class ThoughtCollector {
     _applyTheme(themeId) {
         const valid = THEMES.find(t => t.id === themeId)
         if (!valid) return
-        document.documentElement.setAttribute('data-theme', themeId)
+
+        // Remove old system theme listener
+        if (_systemThemeListener) {
+            window.matchMedia('(prefers-color-scheme: dark)').removeEventListener('change', _systemThemeListener)
+            _systemThemeListener = null
+        }
+
         localStorage.setItem(THEME_KEY, themeId)
+
+        if (themeId === 'system') {
+            const apply = () => {
+                const resolved = _resolveSystemTheme()
+                document.documentElement.setAttribute('data-theme', resolved)
+            }
+            apply()
+            _systemThemeListener = apply
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', _systemThemeListener)
+        } else if (themeId === 'light') {
+            document.documentElement.setAttribute('data-theme', 'docs')
+        } else if (themeId === 'dark') {
+            document.documentElement.setAttribute('data-theme', 'nord')
+        } else {
+            document.documentElement.setAttribute('data-theme', themeId)
+        }
     }
 
     _isMobile() { return window.innerWidth <= 768 }
@@ -158,7 +188,7 @@ export class ThoughtCollector {
 
     // ── Shared shell ──────────────────────────────────────────
     _shell(bodyHtml, { sidebar = true } = {}) {
-        const currentTheme = localStorage.getItem(THEME_KEY) || 'typewriter'
+        const currentTheme = localStorage.getItem(THEME_KEY) || 'system'
         const swatches = THEMES.map(t => `
             <button
                 class="theme-swatch ${t.id === currentTheme ? 'active' : ''}"
@@ -168,7 +198,6 @@ export class ThoughtCollector {
             ></button>
         `).join('')
 
-        // Build sidebar tree (root folders + indented children)
         const sidebarHtml = this._buildSidebarTree(null, 0)
 
         const sidebarEl = sidebar ? `
@@ -208,7 +237,7 @@ export class ThoughtCollector {
         `
     }
 
-    // Recursively build sidebar folder tree with indentation
+    // Recursively build sidebar folder tree with collapsible sections and .md file dots
     _buildSidebarTree(parentId, depth) {
         const children = parentId === null
             ? foldersAPI.listRoots()
@@ -218,22 +247,45 @@ export class ThoughtCollector {
         return children.map(f => {
             const isActive = this.currentFolder?.id === f.id
             const subChildren = foldersAPI.listChildren(f.id)
-            const indent = depth * 12  // px indent per level
+            const hasChildren = subChildren.length > 0 || f.files.length > 0
+            const isCollapsed = this._collapsedFolders.has(f.id)
+            const indent = depth * 12
+
+            // Build file dots (one dot per .md file)
+            const fileDots = !isCollapsed && f.files.length > 0
+                ? f.files.map(file => `
+                    <button class="sidebar-file-dot" data-folder-id="${f.id}" data-file-id="${file.id}"
+                            title="${this._esc(file.title)}"
+                            style="padding-left: calc(0.75rem + ${indent + 20}px)">
+                        <span class="sidebar-dot-icon">·</span>
+                        <span class="sidebar-dot-name">${this._esc(file.title)}</span>
+                    </button>
+                `).join('')
+                : ''
+
+            const chevron = hasChildren
+                ? `<span class="sidebar-chevron ${isCollapsed ? 'collapsed' : ''}">${isCollapsed ? '▶' : '▼'}</span>`
+                : `<span class="sidebar-chevron-spacer"></span>`
+
             return `
-                <button class="sidebar-folder ${isActive ? 'active' : ''}"
-                        data-folder-id="${f.id}"
-                        style="padding-left: calc(0.75rem + ${indent}px)"
-                        title="${this._esc(f.path)}">
-                    <span class="sidebar-icon">${subChildren.length ? '▶' : '·'}</span>
-                    <span class="sidebar-name">${this._esc(f.name)}</span>
-                    <span class="sidebar-count">${f.files.length}</span>
-                </button>
-                ${this._buildSidebarTree(f.id, depth + 1)}
+                <div class="sidebar-folder-group">
+                    <button class="sidebar-folder ${isActive ? 'active' : ''}"
+                            data-folder-id="${f.id}"
+                            style="padding-left: calc(0.75rem + ${indent}px)"
+                            title="${this._esc(f.path)}">
+                        <span class="sidebar-toggle" data-toggle-id="${f.id}">${hasChildren ? chevron : ''}</span>
+                        <span class="sidebar-name">${this._esc(f.name)}</span>
+                        <span class="sidebar-count">${f.files.length}</span>
+                    </button>
+                    ${!isCollapsed ? `
+                        ${fileDots}
+                        ${this._buildSidebarTree(f.id, depth + 1)}
+                    ` : ''}
+                </div>
             `
         }).join('')
     }
 
-    // Build ancestor chain for breadcrumb
     _getAncestors(folder) {
         const chain = []
         let current = folder
@@ -294,7 +346,7 @@ export class ThoughtCollector {
             this._navigate('folders')
         })
 
-        // Breadcrumb folder links (any depth)
+        // Breadcrumb folder links
         this.container.querySelectorAll('.breadcrumb-link[data-folder-id]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 if (this.editorDirty) {
@@ -317,9 +369,17 @@ export class ThoughtCollector {
             })
         })
 
-        // Sidebar folder clicks
+        // Sidebar folder clicks (navigate to folder)
         this.container.querySelectorAll('.sidebar-folder').forEach(btn => {
-            btn.addEventListener('click', async () => {
+            btn.addEventListener('click', async (e) => {
+                // Check if user clicked the toggle chevron
+                const toggle = e.target.closest('.sidebar-toggle')
+                if (toggle) {
+                    e.stopPropagation()
+                    const folderId = toggle.dataset.toggleId || btn.dataset.folderId
+                    this._toggleSidebarFolder(folderId)
+                    return
+                }
                 if (this.editorDirty) {
                     const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                     if (!ok) return
@@ -330,10 +390,92 @@ export class ThoughtCollector {
             })
         })
 
+        // Sidebar toggle buttons (chevrons without folder-id on the span)
+        this.container.querySelectorAll('.sidebar-toggle[data-toggle-id]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                this._toggleSidebarFolder(btn.dataset.toggleId)
+            })
+        })
+
+        // Sidebar file dots - open file directly
+        this.container.querySelectorAll('.sidebar-file-dot').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation()
+                if (this.editorDirty) {
+                    const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                    if (!ok) return
+                }
+                this.editorDirty = false
+                const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
+                if (!folder) return
+                const file = folder.files.find(f => f.id === btn.dataset.fileId)
+                if (file) {
+                    this.currentFolder = folder
+                    this._openFile(file)
+                }
+            })
+        })
+
         // Sidebar new root folder button
         const sidebarNewBtn = this.container.querySelector('#sidebar-new-folder')
         if (sidebarNewBtn) {
             sidebarNewBtn.addEventListener('click', () => this._promptNewFolder(null))
+        }
+    }
+
+    _toggleSidebarFolder(folderId) {
+        if (this._collapsedFolders.has(folderId)) {
+            this._collapsedFolders.delete(folderId)
+        } else {
+            this._collapsedFolders.add(folderId)
+        }
+        localStorage.setItem(SIDEBAR_OPEN_KEY, JSON.stringify([...this._collapsedFolders]))
+        // Re-render just the sidebar list
+        const sidebarList = this.container.querySelector('.sidebar-list')
+        if (sidebarList) {
+            sidebarList.innerHTML = this._buildSidebarTree(null, 0) || '<p class="sidebar-empty">No folders yet</p>'
+            // Re-bind sidebar events
+            this.container.querySelectorAll('.sidebar-folder').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    const toggle = e.target.closest('.sidebar-toggle')
+                    if (toggle) {
+                        e.stopPropagation()
+                        this._toggleSidebarFolder(toggle.dataset.toggleId || btn.dataset.folderId)
+                        return
+                    }
+                    if (this.editorDirty) {
+                        const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                        if (!ok) return
+                    }
+                    this.editorDirty = false
+                    const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
+                    if (folder) this._navigate('files', { folder })
+                })
+            })
+            this.container.querySelectorAll('.sidebar-toggle[data-toggle-id]').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation()
+                    this._toggleSidebarFolder(btn.dataset.toggleId)
+                })
+            })
+            this.container.querySelectorAll('.sidebar-file-dot').forEach(btn => {
+                btn.addEventListener('click', async (e) => {
+                    e.stopPropagation()
+                    if (this.editorDirty) {
+                        const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                        if (!ok) return
+                    }
+                    this.editorDirty = false
+                    const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
+                    if (!folder) return
+                    const file = folder.files.find(f => f.id === btn.dataset.fileId)
+                    if (file) {
+                        this.currentFolder = folder
+                        this._openFile(file)
+                    }
+                })
+            })
         }
     }
 
@@ -442,9 +584,41 @@ export class ThoughtCollector {
             : `Delete "${folder.name}" and all its files?`
         const ok = await this._showModal({ type: 'confirm', title: 'DELETE FOLDER', message: msg })
         if (!ok) return
-        foldersAPI.delete(id)
-            .then(() => { this._render() })
-            .catch(err => this._toast(`> DELETE ERROR: ${err.message}`))
+
+        // Collect all files to show progress
+        const allFiles = this._collectFolderFiles(id)
+        const total = allFiles.length
+
+        if (total > 0) {
+            this._showProgressToast('Deleting', total)
+            foldersAPI.deleteWithProgress(id, (done, t) => {
+                this._updateProgressToast('Deleting', done, t)
+            })
+                .then(() => {
+                    this._hideProgressToast()
+                    this._render()
+                })
+                .catch(err => {
+                    this._hideProgressToast()
+                    this._toast(`> DELETE ERROR: ${err.message}`)
+                })
+        } else {
+            foldersAPI.delete(id)
+                .then(() => { this._render() })
+                .catch(err => this._toast(`> DELETE ERROR: ${err.message}`))
+        }
+    }
+
+    _collectFolderFiles(folderId) {
+        const all = []
+        const collect = (id) => {
+            const f = foldersAPI.list().find(x => x.id === id)
+            if (!f) return
+            all.push(...f.files)
+            foldersAPI.listChildren(id).forEach(c => collect(c.id))
+        }
+        collect(folderId)
+        return all
     }
 
     // ── Files view (shows subfolders + files) ──────────────────
@@ -460,7 +634,6 @@ export class ThoughtCollector {
         const subfolders = foldersAPI.listChildren(folder.id)
         const files = folder.files
 
-        // Subfolder cards
         const subfolderCards = subfolders.map(f => `
             <div class="folder-card subfolder-card" data-id="${f.id}">
                 <div class="folder-icon">▶</div>
@@ -475,7 +648,6 @@ export class ThoughtCollector {
             </div>
         `).join('')
 
-        // File cards
         const fileCards = files.map((f) => `
             <div class="file-card" data-id="${f.id}">
                 <div class="file-icon">#</div>
@@ -549,7 +721,7 @@ export class ThoughtCollector {
             this._promptNewFile()
         })
 
-        // Drag-and-drop on the file list
+        // Drag-and-drop
         const fileList = this.container.querySelector('#file-list')
         fileList.addEventListener('dragover', e => { e.preventDefault(); fileList.classList.add('drag-over') })
         fileList.addEventListener('dragleave', () => fileList.classList.remove('drag-over'))
@@ -603,22 +775,30 @@ export class ThoughtCollector {
         })
     }
 
-    // ── .md file upload ───────────────────────────────────────
+    // ── .md file upload with progress ────────────────────────
     async _handleMdUpload(input) {
         const files = Array.from(input.files || []).filter(f => f.name.endsWith('.md'))
         if (!files.length) return
 
+        const total = files.length
+        this._showProgressToast('Uploading', total)
         let succeeded = 0
-        for (const f of files) {
+
+        for (let i = 0; i < files.length; i++) {
+            const f = files[i]
             try {
                 const content = await f.text()
                 const title   = f.name.replace(/\.md$/i, '').replace(/-/g, ' ')
                 await filesAPI.create(this.currentFolder.id, title, content)
                 succeeded++
+                this._updateProgressToast('Uploading', i + 1, total)
             } catch (err) {
                 this._toast(`> UPLOAD ERROR: ${f.name}: ${err.message}`)
+                this._updateProgressToast('Uploading', i + 1, total)
             }
         }
+
+        this._hideProgressToast()
         if (succeeded) {
             this._toast(`> UPLOADED ${succeeded} FILE${succeeded > 1 ? 'S' : ''}`)
             this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
@@ -627,12 +807,9 @@ export class ThoughtCollector {
         if (input.value !== undefined) input.value = ''
     }
 
-    // ── Folder upload (webkitdirectory) ───────────────────────
-    // Reads all .md files from the selected directory tree.
-    // Recreates the subfolder structure under the current folder.
+    // ── Folder upload with progress ───────────────────────────
     async _handleFolderUpload(input) {
         const allFiles = Array.from(input.files || [])
-        // Filter to .md only — skip images and other files
         const mdFiles = allFiles.filter(f => f.name.endsWith('.md'))
         if (!mdFiles.length) {
             this._toast('> NO .MD FILES FOUND IN FOLDER')
@@ -640,31 +817,23 @@ export class ThoughtCollector {
             return
         }
 
-        // Show progress toast
-        this._toast(`> UPLOADING ${mdFiles.length} FILE${mdFiles.length !== 1 ? 'S' : ''}...`)
-
+        const total = mdFiles.length
+        this._showProgressToast('Uploading', total)
         let succeeded = 0
         let errors = 0
 
-        for (const f of mdFiles) {
+        for (let i = 0; i < mdFiles.length; i++) {
+            const f = mdFiles[i]
             try {
-                // f.webkitRelativePath = "FolderName/sub/file.md"
-                // We strip the top-level folder name (it becomes the current folder)
-                // and treat everything else as subpath
                 const relPath = f.webkitRelativePath || f.name
                 const parts = relPath.split('/')
-
-                // parts[0] is the selected folder name — skip it, we're already inside currentFolder
-                // parts[1..n-1] are subfolder names, parts[n] is the filename
-                const subParts = parts.slice(1)   // drop the top-level folder name
+                const subParts = parts.slice(1)
                 const fileName = subParts[subParts.length - 1]
-                const subFolderParts = subParts.slice(0, -1)  // any intermediate subfolders
+                const subFolderParts = subParts.slice(0, -1)
 
-                // Find or create the target folder
                 let targetFolder = this.currentFolder
                 for (const seg of subFolderParts) {
                     if (!seg) continue
-                    // Look for an existing child with this name
                     let child = foldersAPI.listChildren(targetFolder.id)
                         .find(c => c.name.toLowerCase() === seg.toLowerCase()
                                 || c.path.endsWith('/' + seg.toLowerCase().replace(/\s+/g, '-')))
@@ -678,12 +847,15 @@ export class ThoughtCollector {
                 const title   = fileName.replace(/\.md$/i, '').replace(/-/g, ' ')
                 await filesAPI.create(targetFolder.id, title, content)
                 succeeded++
+                this._updateProgressToast('Uploading', i + 1, total)
             } catch (err) {
                 errors++
                 this._toast(`> ERROR: ${f.name}: ${err.message}`)
+                this._updateProgressToast('Uploading', i + 1, total)
             }
         }
 
+        this._hideProgressToast()
         if (succeeded) {
             this._toast(`> UPLOADED ${succeeded} FILE${succeeded > 1 ? 'S' : ''}${errors ? `, ${errors} FAILED` : ''}`)
             this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
@@ -736,6 +908,7 @@ export class ThoughtCollector {
         const file = this.currentFile
         const folder = this.currentFolder
         const mode = this._isMobile() ? 'edit' : this.editorMode
+        const autosaveChecked = this.autosave ? 'checked' : ''
 
         const modeButtons = `
             <div class="mode-toggle" id="mode-toggle">
@@ -759,6 +932,14 @@ export class ThoughtCollector {
                     />
                     <div class="editor-actions">
                         ${modeButtons}
+                        <label class="autosave-toggle" title="Toggle autosave">
+                            <input type="checkbox" id="autosave-check" ${autosaveChecked}>
+                            <span class="autosave-label">AUTO</span>
+                        </label>
+                        <button class="cyber-btn compact-btn" id="pdf-btn" title="Export as PDF">
+                            <span class="btn-text">PDF</span>
+                            <span class="btn-glow"></span>
+                        </button>
                         <span class="save-status" id="save-status"></span>
                         <button class="cyber-btn compact-btn" id="save-btn">
                             <span class="btn-text">SAVE</span>
@@ -796,12 +977,37 @@ export class ThoughtCollector {
         const charCount   = this.container.querySelector('#char-count')
         const preview     = this.container.querySelector('#editor-preview')
         const editorZone  = this.container.querySelector('#editor-zone')
+        const autosaveChk = this.container.querySelector('#autosave-check')
+        const pdfBtn      = this.container.querySelector('#pdf-btn')
 
         contentArea.value = file.content || ''
         this._renderPreview(preview, contentArea.value)
 
-        preview.addEventListener('click', () => {
+        // Autosave toggle
+        autosaveChk.addEventListener('change', () => {
+            this.autosave = autosaveChk.checked
+            localStorage.setItem(AUTOSAVE_KEY, this.autosave)
+        })
+
+        // PDF export
+        pdfBtn.addEventListener('click', () => this._exportPDF(titleInput.value, preview))
+
+        preview.addEventListener('click', (e) => {
+            // Checkbox click in preview → sync to editor
+            if (e.target.type === 'checkbox' && e.target.closest('.task-list-item')) {
+                e.preventDefault()
+                this._syncCheckboxToEditor(e.target, contentArea)
+                return
+            }
             if (editorZone.dataset.mode === 'preview') this._setEditorMode('edit', editorZone)
+        })
+
+        // Click in preview → jump to editor position
+        preview.addEventListener('mouseup', (e) => {
+            if (e.target.type === 'checkbox') return
+            if (editorZone.dataset.mode === 'split') {
+                this._syncPreviewClickToEditor(e, preview, contentArea)
+            }
         })
 
         this.container.querySelectorAll('.mode-btn').forEach(btn => {
@@ -821,6 +1027,21 @@ export class ThoughtCollector {
             charCount.textContent = `${contentArea.value.length} chars`
             clearTimeout(previewTimer)
             previewTimer = setTimeout(() => this._renderPreview(preview, contentArea.value), 100)
+            // Schedule autosave
+            if (this.autosave) {
+                clearTimeout(this._autosaveTimer)
+                this._autosaveTimer = setTimeout(() => doSave(), 2000)
+            }
+        })
+
+        // Obsidian-style editor key behaviors
+        contentArea.addEventListener('keydown', (e) => {
+            this._handleEditorKeydown(e, contentArea)
+        })
+
+        // Smart link insertion (paste URL over selection)
+        contentArea.addEventListener('paste', (e) => {
+            this._handleSmartPaste(e, contentArea, markDirty, preview)
         })
 
         const doSave = () => {
@@ -851,19 +1072,379 @@ export class ThoughtCollector {
         }
         contentArea.addEventListener('keydown', handleSaveKey)
         titleInput.addEventListener('keydown', handleSaveKey)
+
+        // Link insertion button (shown on text selection)
+        this._setupLinkToolbar(contentArea, markDirty, preview)
     }
 
+    // ── Obsidian-style editor keydown behaviors ────────────────
+    _handleEditorKeydown(e, textarea) {
+        const val = textarea.value
+        const start = textarea.selectionStart
+        const end = textarea.selectionEnd
+
+        if (e.key === 'Enter') {
+            const lineStart = val.lastIndexOf('\n', start - 1) + 1
+            const currentLine = val.slice(lineStart, start)
+
+            // Match list prefixes: -, *, +, numbers, or task lists
+            const listMatch = currentLine.match(/^(\s*)([-*+]|\d+[.)]) (\[[ xX]\] )?/)
+            if (listMatch) {
+                const indent = listMatch[1]
+                const bullet = listMatch[2]
+                const taskPart = listMatch[3] || ''
+                const lineContent = currentLine.slice(listMatch[0].length)
+
+                // If line is empty (just the bullet), remove the bullet and dedent
+                if (!lineContent.trim()) {
+                    e.preventDefault()
+                    // Remove the empty list marker
+                    const newVal = val.slice(0, lineStart) + '\n' + val.slice(start)
+                    textarea.value = newVal
+                    const newPos = lineStart + 1
+                    textarea.setSelectionRange(newPos, newPos)
+                    textarea.dispatchEvent(new Event('input'))
+                    return
+                }
+
+                e.preventDefault()
+                // Continue the list
+                let nextBullet = bullet
+                if (/^\d+[.)]$/.test(bullet)) {
+                    nextBullet = (parseInt(bullet) + 1) + bullet.slice(-1)
+                }
+                const nextTask = taskPart ? '[ ] ' : ''
+                const insertion = '\n' + indent + nextBullet + ' ' + nextTask
+                const newVal = val.slice(0, start) + insertion + val.slice(end)
+                textarea.value = newVal
+                const newPos = start + insertion.length
+                textarea.setSelectionRange(newPos, newPos)
+                textarea.dispatchEvent(new Event('input'))
+                return
+            }
+
+            // Blockquote continuation
+            const blockquoteMatch = currentLine.match(/^(\s*> )/)
+            if (blockquoteMatch) {
+                const lineContent = currentLine.slice(blockquoteMatch[0].length)
+                if (!lineContent.trim()) {
+                    e.preventDefault()
+                    const newVal = val.slice(0, lineStart) + '\n' + val.slice(start)
+                    textarea.value = newVal
+                    textarea.setSelectionRange(lineStart + 1, lineStart + 1)
+                    textarea.dispatchEvent(new Event('input'))
+                    return
+                }
+                e.preventDefault()
+                const insertion = '\n' + blockquoteMatch[0]
+                const newVal = val.slice(0, start) + insertion + val.slice(end)
+                textarea.value = newVal
+                const newPos = start + insertion.length
+                textarea.setSelectionRange(newPos, newPos)
+                textarea.dispatchEvent(new Event('input'))
+                return
+            }
+        }
+
+        // Tab key: indent/dedent list items, or insert spaces
+        if (e.key === 'Tab') {
+            e.preventDefault()
+            const lineStart = val.lastIndexOf('\n', start - 1) + 1
+            const currentLine = val.slice(lineStart, val.indexOf('\n', start) === -1 ? val.length : val.indexOf('\n', start))
+            const isList = /^\s*([-*+]|\d+[.)]) /.test(currentLine)
+
+            if (isList) {
+                if (e.shiftKey) {
+                    // Dedent: remove up to 2 spaces or 1 tab from start of line
+                    const dedented = currentLine.replace(/^  |^\t/, '')
+                    if (dedented !== currentLine) {
+                        const removed = currentLine.length - dedented.length
+                        const lineEnd = val.indexOf('\n', lineStart)
+                        const newVal = val.slice(0, lineStart) + dedented + (lineEnd === -1 ? '' : val.slice(lineEnd))
+                        textarea.value = newVal
+                        const newPos = Math.max(lineStart, start - removed)
+                        textarea.setSelectionRange(newPos, newPos)
+                        textarea.dispatchEvent(new Event('input'))
+                    }
+                } else {
+                    // Indent: add 2 spaces
+                    const lineEnd = val.indexOf('\n', lineStart)
+                    const newVal = val.slice(0, lineStart) + '  ' + currentLine + (lineEnd === -1 ? '' : val.slice(lineEnd))
+                    textarea.value = newVal
+                    textarea.setSelectionRange(start + 2, start + 2)
+                    textarea.dispatchEvent(new Event('input'))
+                }
+            } else {
+                // Regular tab: insert 4 spaces or shift-tab dedents
+                if (e.shiftKey) {
+                    const dedented = currentLine.replace(/^    |^\t/, '')
+                    if (dedented !== currentLine) {
+                        const removed = currentLine.length - dedented.length
+                        const lineEnd = val.indexOf('\n', lineStart)
+                        const newVal = val.slice(0, lineStart) + dedented + (lineEnd === -1 ? '' : val.slice(lineEnd))
+                        textarea.value = newVal
+                        textarea.setSelectionRange(Math.max(lineStart, start - removed), Math.max(lineStart, start - removed))
+                        textarea.dispatchEvent(new Event('input'))
+                    }
+                } else {
+                    const insertion = '    '
+                    const newVal = val.slice(0, start) + insertion + val.slice(end)
+                    textarea.value = newVal
+                    textarea.setSelectionRange(start + 4, start + 4)
+                    textarea.dispatchEvent(new Event('input'))
+                }
+            }
+            return
+        }
+
+        // Auto-close markdown pairs: **, __, ~~, ==, ``
+        if (!e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            const pairs = { '`': '`', '*': '*', '_': '_', '~': '~', '=': '=' }
+            if (e.key in pairs && start !== end) {
+                // Wrap selection
+                e.preventDefault()
+                const selected = val.slice(start, end)
+                const wrapped = e.key + selected + pairs[e.key]
+                textarea.value = val.slice(0, start) + wrapped + val.slice(end)
+                textarea.setSelectionRange(start + 1, end + 1)
+                textarea.dispatchEvent(new Event('input'))
+                return
+            }
+        }
+    }
+
+    // ── Smart paste: URL over selection → link ────────────────
+    _handleSmartPaste(e, textarea, markDirty, preview) {
+        const clipText = (e.clipboardData || window.clipboardData)?.getData('text') || ''
+        if (!clipText) return
+
+        const isUrl = /^https?:\/\/\S+$/.test(clipText.trim())
+        const start = textarea.selectionStart
+        const end = textarea.selectionEnd
+
+        if (isUrl && start !== end) {
+            e.preventDefault()
+            const selected = textarea.value.slice(start, end)
+            // If selection looks like an existing URL, replace it
+            const isSelectedUrl = /^https?:\/\/\S+$/.test(selected.trim())
+            let replacement
+            if (isSelectedUrl) {
+                replacement = clipText.trim()
+            } else {
+                replacement = `[${selected}](${clipText.trim()})`
+            }
+            const newVal = textarea.value.slice(0, start) + replacement + textarea.value.slice(end)
+            textarea.value = newVal
+            textarea.setSelectionRange(start + replacement.length, start + replacement.length)
+            markDirty()
+            clearTimeout(this._previewTimer)
+            this._previewTimer = setTimeout(() => this._renderPreview(preview, textarea.value), 100)
+        }
+    }
+
+    // ── Link toolbar (floats over selection) ──────────────────
+    _setupLinkToolbar(textarea, markDirty, preview) {
+        // Create a floating toolbar
+        const toolbar = document.createElement('div')
+        toolbar.className = 'link-toolbar'
+        toolbar.innerHTML = `<button class="link-toolbar-btn" title="Insert link">🔗 Link</button>`
+        toolbar.style.display = 'none'
+        document.body.appendChild(toolbar)
+
+        const showToolbar = () => {
+            const start = textarea.selectionStart
+            const end = textarea.selectionEnd
+            if (start === end) { toolbar.style.display = 'none'; return }
+
+            const rect = textarea.getBoundingClientRect()
+            // Estimate position from caret
+            toolbar.style.display = 'flex'
+            toolbar.style.left = `${rect.left + 8}px`
+            toolbar.style.top = `${rect.top - 36}px`
+        }
+
+        textarea.addEventListener('mouseup', showToolbar)
+        textarea.addEventListener('keyup', (e) => {
+            if (e.shiftKey) showToolbar()
+            else toolbar.style.display = 'none'
+        })
+        document.addEventListener('mousedown', (e) => {
+            if (!toolbar.contains(e.target) && e.target !== textarea) {
+                toolbar.style.display = 'none'
+            }
+        })
+
+        toolbar.querySelector('.link-toolbar-btn').addEventListener('mousedown', async (e) => {
+            e.preventDefault()
+            const start = textarea.selectionStart
+            const end   = textarea.selectionEnd
+            const selected = textarea.value.slice(start, end)
+            toolbar.style.display = 'none'
+
+            const url = await this._showModal({ type: 'input', title: 'INSERT LINK', placeholder: 'https://...', defaultValue: '' })
+            if (!url) return
+            const link = `[${selected}](${url.trim()})`
+            const newVal = textarea.value.slice(0, start) + link + textarea.value.slice(end)
+            textarea.value = newVal
+            textarea.setSelectionRange(start + link.length, start + link.length)
+            textarea.focus()
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+        })
+
+        // Cleanup on re-render
+        const zone = this.container.querySelector('#editor-zone')
+        if (zone) {
+            const obs = new MutationObserver(() => {
+                if (!document.body.contains(textarea)) {
+                    toolbar.remove()
+                    obs.disconnect()
+                }
+            })
+            obs.observe(document.body, { childList: true, subtree: true })
+        }
+    }
+
+    // ── Sync checkbox click in preview → editor text ──────────
+    _syncCheckboxToEditor(checkbox, textarea) {
+        const isChecked = !checkbox.checked  // it was prevented, so state is pre-click
+        const taskItem = checkbox.closest('.task-list-item') || checkbox.parentElement
+        // Get the text content to find it in the editor
+        const itemText = taskItem.textContent.trim().replace(/^[\s✓x✗]*/, '').trim()
+
+        const val = textarea.value
+        // Find the matching task in the markdown
+        // Pattern: - [ ] or - [x] followed by the text
+        const lines = val.split('\n')
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i]
+            const taskMatch = line.match(/^(\s*[-*+] \[)([ xX])(\] )(.*)$/)
+            if (taskMatch) {
+                const lineText = taskMatch[4].trim()
+                if (itemText.includes(lineText) || lineText.includes(itemText.slice(0, 30))) {
+                    const currentlyChecked = taskMatch[2].toLowerCase() === 'x'
+                    // Toggle
+                    lines[i] = taskMatch[1] + (currentlyChecked ? ' ' : 'x') + taskMatch[3] + taskMatch[4]
+                    textarea.value = lines.join('\n')
+                    textarea.dispatchEvent(new Event('input'))
+                    break
+                }
+            }
+        }
+    }
+
+    // ── Click in preview → jump to matching text in editor ────
+    _syncPreviewClickToEditor(e, preview, textarea) {
+        const target = e.target.closest('p, h1, h2, h3, h4, h5, h6, li, blockquote, td')
+        if (!target) return
+        // Get the plain text of the clicked element (truncated for search)
+        const previewText = target.textContent.trim().slice(0, 60).replace(/\s+/g, ' ')
+        if (!previewText) return
+
+        const lines = textarea.value.split('\n')
+        // Find the best matching line
+        let bestLine = -1
+        let bestScore = 0
+        for (let i = 0; i < lines.length; i++) {
+            const stripped = lines[i].replace(/^#{1,6}\s+|^[-*+]\s+|^\d+[.)]\s+|^\s*>\s+/, '').trim()
+            if (!stripped) continue
+            // Compute overlap
+            const overlap = this._textOverlap(previewText.toLowerCase(), stripped.toLowerCase())
+            if (overlap > bestScore) {
+                bestScore = overlap
+                bestLine = i
+            }
+        }
+
+        if (bestLine < 0 || bestScore < 8) return
+
+        let pos = 0
+        for (let i = 0; i < bestLine; i++) {
+            pos += lines[i].length + 1
+        }
+        textarea.focus()
+        textarea.setSelectionRange(pos, pos)
+        const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
+        textarea.scrollTop = bestLine * lineHeight - textarea.clientHeight / 2
+    }
+
+    _textOverlap(a, b) {
+        // Count matching characters in common prefix of longest substring
+        let count = 0
+        const minLen = Math.min(a.length, b.length, 40)
+        for (let i = 0; i < minLen; i++) {
+            if (a[i] === b[i]) count++
+            else break
+        }
+        return count
+    }
+
+    // ── PDF Export ────────────────────────────────────────────
+    _exportPDF(title, previewEl) {
+        const printWindow = window.open('', '_blank')
+        const currentTheme = document.documentElement.getAttribute('data-theme') || 'cyberpunk'
+        // Get computed styles for the preview
+        const previewStyle = getComputedStyle(previewEl)
+
+        printWindow.document.write(`
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>${this._esc(title)}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <style>
+        body {
+            font-family: ${previewStyle.fontFamily};
+            font-size: 14px;
+            line-height: 1.8;
+            color: #000;
+            background: #fff;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px;
+        }
+        h1, h2, h3, h4, h5, h6 { color: #111; margin: 1.5rem 0 0.75rem; }
+        h2 { border-bottom: 1px solid #ccc; padding-bottom: 0.4rem; }
+        p { margin: 0.75rem 0; }
+        strong { font-weight: bold; }
+        em { font-style: italic; }
+        a { color: #1a73e8; }
+        code { background: #f5f5f5; padding: 0.1em 0.4em; font-family: 'Courier New', monospace; font-size: 0.9em; border: 1px solid #ddd; border-radius: 3px; }
+        pre { background: #f5f5f5; border: 1px solid #ddd; padding: 1rem; overflow-x: auto; }
+        pre code { background: none; border: none; padding: 0; }
+        blockquote { border-left: 3px solid #999; padding-left: 1rem; color: #555; margin: 1rem 0; }
+        ul, ol { padding-left: 1.5rem; margin: 0.75rem 0; }
+        li { margin: 0.3rem 0; }
+        hr { border: none; border-top: 1px solid #ccc; margin: 1.5rem 0; }
+        table { border-collapse: collapse; width: 100%; }
+        th { background: #f5f5f5; padding: 0.5rem 0.75rem; border: 1px solid #ddd; text-align: left; }
+        td { padding: 0.5rem 0.75rem; border: 1px solid #ddd; }
+        .task-list-item { list-style: none; }
+        .task-list-item input[type="checkbox"] { margin-right: 0.4em; }
+        h1.pdf-title { font-size: 2rem; border-bottom: 2px solid #333; padding-bottom: 0.5rem; margin-bottom: 2rem; }
+        @media print { body { padding: 20px; } }
+    </style>
+</head>
+<body>
+    <h1 class="pdf-title">${this._esc(title)}</h1>
+    ${previewEl.innerHTML}
+    <script>window.onload = function() { window.print(); }<\/script>
+</body>
+</html>
+        `)
+        printWindow.document.close()
+    }
+
+    // ── Math normalisation ────────────────────────────────────
     _normaliseMath(md) {
-        // Convert multi-line [ ... ] display math blocks — put on one line so marked doesn't split them
-        // Handles:  [\ny = \sin(x)\n]  →  $$y = \sin(x)$$
         md = md.replace(/^\s*\[\s*\n([\s\S]*?)\n\s*\]\s*$/gm, (_, inner) => `$$${inner.trim()}$$`)
-        // Single-line [ \expr ]  →  $$\expr$$
         md = md.replace(/^\s*\[\s*(.*?\\.*?)\s*\]\s*$/gm, (_, inner) => `$$${inner.trim()}$$`)
-        // Inline math in parens: (\frac{\pi}{2}) — only when containing a backslash
         md = md.replace(/\(([^()]*\\[^()]*)\)/g, (_, inner) => `$${inner.trim()}$`)
         return md
     }
 
+    // ── Render preview with source line tracking ──────────────
     _renderPreview(previewEl, markdown) {
         const normalised = this._normaliseMath(markdown || '')
         if (typeof marked !== 'undefined') {
@@ -871,6 +1452,19 @@ export class ThoughtCollector {
         } else {
             previewEl.textContent = normalised
         }
+
+        // Make checkboxes interactive (GFM task lists)
+        previewEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.removeAttribute('disabled')
+            cb.style.cursor = 'pointer'
+        })
+
+        // Apply special monospace formatting for ==code== (highlight) - already handled by marked
+        // Style inline code with extra LaTeX-like monospace emphasis
+        previewEl.querySelectorAll('code:not(pre code)').forEach(el => {
+            el.classList.add('inline-code-tt')
+        })
+
         // Render math with KaTeX
         if (typeof renderMathInElement !== 'undefined') {
             renderMathInElement(previewEl, {
@@ -904,6 +1498,56 @@ export class ThoughtCollector {
             const contentArea = editorZone.querySelector('#file-content')
             if (contentArea) setTimeout(() => contentArea.focus(), 50)
         }
+    }
+
+    // ── Progress toast ────────────────────────────────────────
+    _showProgressToast(action, total) {
+        const existing = document.getElementById('progress-toast')
+        if (existing) existing.remove()
+
+        const toast = document.createElement('div')
+        toast.id = 'progress-toast'
+        toast.className = 'progress-toast'
+        toast.innerHTML = `
+            <div class="progress-header">
+                <span class="progress-action">> ${action.toUpperCase()} <span id="progress-fraction">0/${total}</span></span>
+                <span class="progress-pct" id="progress-pct">0%</span>
+            </div>
+            <div class="progress-bar-outer">
+                <div class="progress-bar-inner" id="progress-bar-inner" style="width:0%"></div>
+            </div>
+            <div class="progress-tracks" id="progress-tracks"></div>
+        `
+        document.body.appendChild(toast)
+        setTimeout(() => toast.classList.add('visible'), 10)
+        this._progressTotal = total
+        this._progressDone = 0
+    }
+
+    _updateProgressToast(action, done, total) {
+        const pct = Math.round((done / total) * 100)
+        const fraction = document.getElementById('progress-fraction')
+        const pctEl = document.getElementById('progress-pct')
+        const bar = document.getElementById('progress-bar-inner')
+        const tracks = document.getElementById('progress-tracks')
+
+        if (fraction) fraction.textContent = `${done}/${total}`
+        if (pctEl) pctEl.textContent = `${pct}%`
+        if (bar) bar.style.width = `${pct}%`
+        if (tracks) {
+            // Add a track dot for each completed file
+            const dot = document.createElement('span')
+            dot.className = 'progress-track-dot done'
+            dot.title = `File ${done}`
+            tracks.appendChild(dot)
+        }
+    }
+
+    _hideProgressToast() {
+        const toast = document.getElementById('progress-toast')
+        if (!toast) return
+        toast.classList.remove('visible')
+        setTimeout(() => toast.remove(), 400)
     }
 
     // ── Utilities ─────────────────────────────────────────────

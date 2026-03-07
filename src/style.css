@@ -89,6 +89,161 @@
 }
 
 /* ══════════════════════════════════════════════════════════════
+   THEME: LIGHT (clean minimal light)
+   ══════════════════════════════════════════════════════════════ */
+[data-theme="light"] {
+    --nc-bg-void:     #f8f9fa;
+    --nc-bg-dark:     #ffffff;
+    --nc-bg-mid:      #f1f3f5;
+    --nc-red:         #2563eb;
+    --nc-red-dim:     #bfdbfe;
+    --nc-cyan:        #1d4ed8;
+    --nc-cyan-dim:    #dbeafe;
+    --nc-yellow:      #d97706;
+    --nc-purple:      #7c3aed;
+    --nc-text:        #111827;
+    --nc-text-dim:    #6b7280;
+    --nc-glow-red:    none;
+    --nc-glow-cyan:   none;
+    --nc-glow-yellow: none;
+
+    --t-body-bg:        #f8f9fa;
+    --t-body-bg-image:  none;
+    --t-body-bg-size:   auto;
+    --t-header-bg:      #ffffff;
+    --t-header-border:  #e5e7eb;
+    --t-card-bg:        #ffffff;
+    --t-card-border:    #e5e7eb;
+    --t-card-hover-border: #2563eb;
+    --t-file-card-border: #e5e7eb;
+    --t-file-card-hover:  #2563eb;
+    --t-input-bg:       #ffffff;
+    --t-input-border:   #d1d5db;
+    --t-input-focus:    #2563eb;
+    --t-textarea-bg:    #ffffff;
+    --t-textarea-border: #d1d5db;
+    --t-textarea-focus: #2563eb;
+    --t-btn-border:     #2563eb;
+    --t-btn-color:      #2563eb;
+    --t-btn-bg-hover:   #2563eb;
+    --t-btn-text-hover: #ffffff;
+    --t-accent:         #2563eb;
+    --t-accent2:        #1d4ed8;
+    --t-accent3:        #d97706;
+    --t-label-color:    #6b7280;
+    --t-breadcrumb-color: #2563eb;
+    --t-font-ui:        'Inter', 'Segoe UI', Arial, sans-serif;
+    --t-font-heading:   'Inter', 'Segoe UI', Arial, sans-serif;
+    --t-font-editor:    'Inter', 'Segoe UI', Arial, sans-serif;
+    --t-preview-h-color:    #111827;
+    --t-preview-h-shadow:   none;
+    --t-preview-strong:     #111827;
+    --t-preview-em:         #6b7280;
+    --t-preview-code-bg:    #f3f4f6;
+    --t-preview-code-color: #7c3aed;
+    --t-preview-code-border: #e5e7eb;
+    --t-preview-pre-border: #e5e7eb;
+    --t-preview-blockquote: #2563eb;
+    --t-preview-link:       #2563eb;
+    --t-preview-marker-ul:  #2563eb;
+    --t-preview-marker-ol:  #2563eb;
+    --t-preview-hr:         #e5e7eb;
+    --t-preview-th-bg:      #f3f4f6;
+    --t-preview-th-color:   #111827;
+    --t-preview-td-border:  #e5e7eb;
+    --t-preview-border:     #e5e7eb;
+    --t-preview-bg:         #ffffff;
+    --t-divider-color:      #e5e7eb;
+    --t-mode-toggle-border: #e5e7eb;
+    --t-mode-btn-active-bg: #2563eb;
+    --t-mode-btn-active-color: #ffffff;
+    --t-scanlines: 0;
+    --t-noise: 0;
+    --t-clip-input: none;
+    --t-clip-textarea: none;
+    --t-clip-btn: none;
+    font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   THEME: DARK (deep dark minimal)
+   ══════════════════════════════════════════════════════════════ */
+[data-theme="dark"] {
+    --nc-bg-void:     #0f172a;
+    --nc-bg-dark:     #1e293b;
+    --nc-bg-mid:      #293548;
+    --nc-red:         #60a5fa;
+    --nc-red-dim:     #1e3a5f;
+    --nc-cyan:        #93c5fd;
+    --nc-cyan-dim:    #1e3a5f;
+    --nc-yellow:      #fbbf24;
+    --nc-purple:      #a78bfa;
+    --nc-text:        #e2e8f0;
+    --nc-text-dim:    #64748b;
+    --nc-glow-red:    none;
+    --nc-glow-cyan:   none;
+    --nc-glow-yellow: none;
+
+    --t-body-bg:        #0f172a;
+    --t-body-bg-image:  none;
+    --t-body-bg-size:   auto;
+    --t-header-bg:      rgba(15, 23, 42, 0.95);
+    --t-header-border:  #1e293b;
+    --t-card-bg:        #1e293b;
+    --t-card-border:    #293548;
+    --t-card-hover-border: #60a5fa;
+    --t-file-card-border: #293548;
+    --t-file-card-hover:  #60a5fa;
+    --t-input-bg:       #1e293b;
+    --t-input-border:   #334155;
+    --t-input-focus:    #60a5fa;
+    --t-textarea-bg:    #1e293b;
+    --t-textarea-border: #334155;
+    --t-textarea-focus: #60a5fa;
+    --t-btn-border:     #60a5fa;
+    --t-btn-color:      #60a5fa;
+    --t-btn-bg-hover:   #60a5fa;
+    --t-btn-text-hover: #0f172a;
+    --t-accent:         #60a5fa;
+    --t-accent2:        #93c5fd;
+    --t-accent3:        #fbbf24;
+    --t-label-color:    #60a5fa;
+    --t-breadcrumb-color: #60a5fa;
+    --t-font-ui:        'Inter', 'Segoe UI', Arial, sans-serif;
+    --t-font-heading:   'Inter', 'Segoe UI', Arial, sans-serif;
+    --t-font-editor:    'Inter', 'Segoe UI', Arial, sans-serif;
+    --t-preview-h-color:    #93c5fd;
+    --t-preview-h-shadow:   none;
+    --t-preview-strong:     #fbbf24;
+    --t-preview-em:         #a78bfa;
+    --t-preview-code-bg:    #293548;
+    --t-preview-code-color: #a78bfa;
+    --t-preview-code-border: #334155;
+    --t-preview-pre-border: #334155;
+    --t-preview-blockquote: #60a5fa;
+    --t-preview-link:       #60a5fa;
+    --t-preview-marker-ul:  #60a5fa;
+    --t-preview-marker-ol:  #93c5fd;
+    --t-preview-hr:         #293548;
+    --t-preview-th-bg:      #293548;
+    --t-preview-th-color:   #93c5fd;
+    --t-preview-td-border:  #334155;
+    --t-preview-border:     rgba(96, 165, 250, 0.15);
+    --t-preview-bg:         rgba(0, 0, 0, 0.2);
+    --t-divider-color:      #293548;
+    --t-mode-toggle-border: #293548;
+    --t-mode-btn-active-bg: #60a5fa;
+    --t-mode-btn-active-color: #0f172a;
+    --t-scanlines: 0;
+    --t-noise: 0;
+    --t-clip-input: none;
+    --t-clip-textarea: none;
+    --t-clip-btn: none;
+    font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+}
+
+
+/* ══════════════════════════════════════════════════════════════
    THEME: DOCS (Google Docs / Word style)
    ══════════════════════════════════════════════════════════════ */
 [data-theme="docs"] {
@@ -1340,7 +1495,10 @@ body {
     transform: scale(1.15);
 }
 
-.theme-swatch[data-theme="cyberpunk"] { background: linear-gradient(135deg, #ff003c, #00f5ff); }
+.theme-swatch[data-theme="system"]     { background: linear-gradient(135deg, #f8f9fa 50%, #1e293b 50%); border-color: #aaa; }
+.theme-swatch[data-theme="light"]      { background: #f8f9fa; border-color: #d1d5db; }
+.theme-swatch[data-theme="dark"]       { background: #1e293b; border-color: #334155; }
+.theme-swatch[data-theme="cyberpunk"]  { background: linear-gradient(135deg, #ff003c, #00f5ff); }
 .theme-swatch[data-theme="docs"]       { background: linear-gradient(135deg, #ffffff, #1a73e8); border-color: #dadce0; }
 .theme-swatch[data-theme="typewriter"] { background: linear-gradient(135deg, #faf7f2, #5c4033); }
 .theme-swatch[data-theme="nord"]       { background: linear-gradient(135deg, #3b4252, #88c0d0); }
@@ -1385,17 +1543,23 @@ body {
 [data-theme="docs"] .scanlines,
 [data-theme="typewriter"] .scanlines,
 [data-theme="nord"] .scanlines,
-[data-theme="solarized"] .scanlines { display: none; }
+[data-theme="solarized"] .scanlines,
+[data-theme="light"] .scanlines,
+[data-theme="dark"] .scanlines { display: none; }
 
 [data-theme="docs"] .noise-overlay,
 [data-theme="typewriter"] .noise-overlay,
 [data-theme="nord"] .noise-overlay,
-[data-theme="solarized"] .noise-overlay { display: none; }
+[data-theme="solarized"] .noise-overlay,
+[data-theme="light"] .noise-overlay,
+[data-theme="dark"] .noise-overlay { display: none; }
 
 [data-theme="docs"] .glitch-text,
 [data-theme="typewriter"] .glitch-text,
 [data-theme="nord"] .glitch-text,
-[data-theme="solarized"] .glitch-text {
+[data-theme="solarized"] .glitch-text,
+[data-theme="light"] .glitch-text,
+[data-theme="dark"] .glitch-text {
     animation: none;
     text-shadow: none;
     color: var(--t-accent);
@@ -1408,12 +1572,18 @@ body {
 [data-theme="nord"] .glitch-text::before,
 [data-theme="nord"] .glitch-text::after,
 [data-theme="solarized"] .glitch-text::before,
-[data-theme="solarized"] .glitch-text::after { display: none; }
+[data-theme="solarized"] .glitch-text::after,
+[data-theme="light"] .glitch-text::before,
+[data-theme="light"] .glitch-text::after,
+[data-theme="dark"] .glitch-text::before,
+[data-theme="dark"] .glitch-text::after { display: none; }
 
 [data-theme="docs"] .cyber-btn:hover,
 [data-theme="typewriter"] .cyber-btn:hover,
 [data-theme="nord"] .cyber-btn:hover,
-[data-theme="solarized"] .cyber-btn:hover { animation: none; box-shadow: none; }
+[data-theme="solarized"] .cyber-btn:hover,
+[data-theme="light"] .cyber-btn:hover,
+[data-theme="dark"] .cyber-btn:hover { animation: none; box-shadow: none; }
 
 .user-badge {
     font-size: 0.78rem;
@@ -2019,4 +2189,321 @@ body {
 
 .breadcrumb-link:hover {
     opacity: 0.75;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   NEW FEATURES STYLES
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Sidebar: collapsible folders and file dots ──────────────── */
+.sidebar-folder-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.sidebar-chevron {
+    font-size: 0.5rem;
+    flex-shrink: 0;
+    width: 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--t-accent2, var(--nc-cyan));
+    transition: transform 0.15s;
+}
+
+.sidebar-chevron.collapsed {
+    color: var(--nc-text-dim);
+}
+
+.sidebar-chevron-spacer {
+    width: 10px;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.sidebar-toggle {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    padding: 0 2px;
+    border-radius: 2px;
+}
+
+.sidebar-toggle:hover {
+    background: rgba(0,0,0,0.08);
+}
+
+/* .md file dots in sidebar */
+.sidebar-file-dot {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.75rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    width: 100%;
+    color: var(--nc-text-dim);
+    font-family: var(--t-font-ui);
+    font-size: 0.75rem;
+    transition: background 0.12s, color 0.12s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sidebar-file-dot:hover {
+    background: rgba(0,0,0,0.05);
+    color: var(--nc-text);
+}
+
+.sidebar-dot-icon {
+    color: var(--t-accent3, var(--nc-yellow));
+    font-size: 1.1rem;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.sidebar-dot-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+/* ── Progress Toast ──────────────────────────────────────────── */
+.progress-toast {
+    position: fixed;
+    bottom: 2rem;
+    right: 2rem;
+    z-index: 250;
+    width: 300px;
+    padding: 0.9rem 1.1rem;
+    background: var(--nc-bg-dark, #1e293b);
+    border: 1px solid var(--t-accent, var(--nc-red));
+    color: var(--nc-text);
+    font-family: var(--t-font-ui);
+    font-size: 0.82rem;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+    transform: translateY(24px);
+    opacity: 0;
+    transition: transform 0.3s, opacity 0.3s;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.progress-toast.visible {
+    transform: translateY(0);
+    opacity: 1;
+}
+
+.progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.progress-action {
+    color: var(--t-accent, var(--nc-red));
+    letter-spacing: 0.08em;
+    font-size: 0.78rem;
+}
+
+.progress-pct {
+    font-size: 0.9rem;
+    font-weight: bold;
+    color: var(--t-accent2, var(--nc-cyan));
+    font-family: var(--t-font-heading);
+}
+
+.progress-bar-outer {
+    width: 100%;
+    height: 4px;
+    background: rgba(0,0,0,0.15);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.progress-bar-inner {
+    height: 100%;
+    background: var(--t-accent, var(--nc-red));
+    border-radius: 2px;
+    transition: width 0.2s ease;
+    box-shadow: var(--nc-glow-red);
+}
+
+.progress-tracks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    min-height: 10px;
+}
+
+.progress-track-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--nc-text-dim);
+    transition: background 0.2s;
+}
+
+.progress-track-dot.done {
+    background: var(--t-accent2, var(--nc-cyan));
+}
+
+/* ── Autosave toggle ─────────────────────────────────────────── */
+.autosave-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.autosave-toggle input[type="checkbox"] {
+    accent-color: var(--t-accent, var(--nc-red));
+    width: 13px;
+    height: 13px;
+    cursor: pointer;
+}
+
+.autosave-label {
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    color: var(--nc-text-dim);
+    font-family: var(--t-font-ui);
+    white-space: nowrap;
+}
+
+.autosave-toggle:has(input:checked) .autosave-label {
+    color: var(--t-accent2, var(--nc-cyan));
+}
+
+/* ── Inline code: LaTeX \texttt{} style ─────────────────────── */
+.editor-preview code.inline-code-tt,
+.editor-preview :not(pre) > code {
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
+    background: var(--t-preview-code-bg, var(--nc-bg-mid));
+    color: var(--t-preview-code-color, var(--nc-purple));
+    padding: 0.12em 0.45em;
+    border: 1px solid var(--t-preview-code-border, rgba(189, 0, 255, 0.2));
+    border-radius: 3px;
+    font-size: 0.88em;
+    letter-spacing: 0.01em;
+    /* subtle box decoration to make it feel like \texttt{} */
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.07);
+    font-variant-ligatures: none;
+}
+
+/* ── Task list checkboxes ────────────────────────────────────── */
+.editor-preview input[type="checkbox"] {
+    accent-color: var(--t-accent, var(--nc-red));
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+    margin-right: 0.4em;
+    vertical-align: middle;
+    position: relative;
+    top: -1px;
+}
+
+.editor-preview ul:has(li > input[type="checkbox"]) {
+    list-style: none;
+    padding-left: 0.5rem;
+}
+
+.editor-preview li:has(> input[type="checkbox"]) {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.35rem;
+}
+
+/* ── Link toolbar (floating) ─────────────────────────────────── */
+.link-toolbar {
+    position: fixed;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    z-index: 500;
+    background: var(--nc-bg-dark, #1e293b);
+    border: 1px solid var(--t-accent, var(--nc-red));
+    padding: 3px 6px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+    pointer-events: all;
+}
+
+.link-toolbar-btn {
+    background: transparent;
+    border: none;
+    color: var(--t-accent2, var(--nc-cyan));
+    font-family: var(--t-font-ui);
+    font-size: 0.78rem;
+    cursor: pointer;
+    padding: 2px 6px;
+    white-space: nowrap;
+    transition: color 0.15s, background 0.15s;
+}
+
+.link-toolbar-btn:hover {
+    background: var(--t-accent, var(--nc-red));
+    color: var(--nc-bg-void, #050508);
+}
+
+/* ── Theme picker: mobile improvements ───────────────────────── */
+@media (max-width: 600px) {
+    .theme-picker {
+        gap: 5px;
+    }
+
+    .theme-swatch {
+        width: 22px;
+        height: 22px;
+    }
+
+    /* On very small screens, wrap theme swatches */
+    .header-right {
+        gap: 0.5rem;
+    }
+}
+
+/* System/Light/Dark theme swatches: slightly larger to indicate "special" */
+.theme-swatch[data-theme="system"],
+.theme-swatch[data-theme="light"],
+.theme-swatch[data-theme="dark"] {
+    width: 20px;
+    height: 20px;
+    border-width: 1.5px;
+}
+
+/* ── Sidebar file dot: active state when file is open ─────────── */
+.sidebar-file-dot.active {
+    background: var(--t-mode-btn-active-bg, var(--nc-red));
+    color: var(--t-mode-btn-active-color, var(--nc-bg-void));
+}
+
+.sidebar-file-dot.active .sidebar-dot-icon {
+    color: inherit;
+}
+
+/* ── PDF button compact ──────────────────────────────────────── */
+#pdf-btn {
+    padding: 0.65rem 0.9rem;
+    font-size: 0.7rem;
+}
+
+/* ── Mobile theme picker: better layout ──────────────────────── */
+@media (max-width: 480px) {
+    .theme-picker {
+        flex-wrap: wrap;
+        max-width: 120px;
+        gap: 4px;
+    }
+
+    .theme-swatch {
+        width: 20px;
+        height: 20px;
+    }
 }
