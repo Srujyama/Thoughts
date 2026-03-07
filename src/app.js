@@ -994,7 +994,7 @@ export class ThoughtCollector {
 
         preview.addEventListener('click', (e) => {
             // Checkbox click in preview → sync to editor
-            if (e.target.type === 'checkbox' && e.target.closest('.task-list-item')) {
+            if (e.target.type === 'checkbox') {
                 e.preventDefault()
                 this._syncCheckboxToEditor(e.target, contentArea)
                 return
