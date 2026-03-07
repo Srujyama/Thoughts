@@ -2424,15 +2424,17 @@ body {
 
 .editor-preview li:has(> input[type="checkbox"]) {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-start;
-    gap: 0.5rem;
+    gap: 0 0.5rem;
 }
 
-/* nested lists inside task items */
+/* nested lists break onto a new line, indented past the checkbox */
 .editor-preview li:has(> input[type="checkbox"]) > ul,
 .editor-preview li:has(> input[type="checkbox"]) > ol {
-    margin: 0.25rem 0 0 0;
-    width: 100%;
+    flex-basis: 100%;
+    margin: 0.1rem 0 0 calc(14px + 0.5rem);
+    padding-left: 0.75rem;
 }
 
 /* ── Link toolbar (floating) ─────────────────────────────────── */
