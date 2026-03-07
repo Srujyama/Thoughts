@@ -29,7 +29,21 @@
       "Bash(dig atoliioptwskoqnoipa.supabase.co)",
       "Bash(python3 -c \"import socket; print\\(socket.getaddrinfo\\(''atoliiojptwskoqnoipa.supabase.co'', 443\\)[0]\\)\")",
       "Bash(curl -s \"https://atoliiojptwskoqnoipa.supabase.co/auth/v1/.well-known/jwks.json\")",
-      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts status)"
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts status)",
+      "Bash(python3 -:*)",
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts diff src/api.js src/app.js)",
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts add src/api.js src/app.js)",
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts commit -m \"Re-apply cloud folder sync fixes\")",
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts push)",
+      "Bash(python3 -c \" import json, sys data = json.load\\(sys.stdin\\) text = data[0][''text''] if isinstance\\(data, list\\) else data reqs = json.loads\\(text\\) for r in reqs: url = r.get\\(''url'',''''\\) status = r.get\\(''status'', 0\\) if ''railway'' in url or ''thoughts'' in url.lower\\(\\) or status >= 400 or status == 0: print\\(f''{status} {r.get\\(\"\"method\"\",\"\"\"\"\\)} {url[:100]}''\\) \")",
+      "Bash(python3 -c \":*)",
+      "Bash(# Check the Railway backend URL from the local env cat /Users/srujanyamali/WebstormProjects/thoughts/.env || cat /Users/srujanyamali/WebstormProjects/thoughts/.env.local || grep -r \"\"VITE_API_URL\\\\|railway\"\" /Users/srujanyamali/WebstormProjects/thoughts/.env*)",
+      "Bash(curl -s \"https://thoughts.srujanyamali.com/assets/index-CZylMxmD.js\")",
+      "Bash(git add src/app.js)",
+      "Bash(git commit -m \"Silence SYNC ERROR on cold start — retry once after 5s\")",
+      "Bash(git push)",
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts add src/app.js)",
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts commit -m \"Silence SYNC ERROR on cold start — retry once after 5s\")"
     ]
   }
 }

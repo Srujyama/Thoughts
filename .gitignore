@@ -40,3 +40,4 @@ backend/venv/
 # Supabase local dev (keep supabase/migrations)
 supabase/.branches
 supabase/.temp
+.vercel

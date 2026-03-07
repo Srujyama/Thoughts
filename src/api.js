@@ -312,7 +312,6 @@ export const foldersAPI = {
 
     async delete(folderId) {
         const meta = loadMeta()
-        // Collect this folder and all descendants
         const toDelete = []
         const collect = (id) => {
             const f = meta.folders.find(x => x.id === id)
@@ -322,13 +321,40 @@ export const foldersAPI = {
         }
         collect(folderId)
 
-        // Delete all files and .keep markers from cloud
         const allFiles = toDelete.flatMap(f => f.files)
         const keepMarkers = toDelete.map(f => f.path + '/.keep')
         await Promise.all([
             ...allFiles.map(f => vaultAPI.deleteFile(f.path).catch(() => {})),
             ...keepMarkers.map(p => vaultAPI.deleteFile(p).catch(() => {})),
         ])
+
+        const deleteIds = new Set(toDelete.map(f => f.id))
+        meta.folders = meta.folders.filter(f => !deleteIds.has(f.id))
+        saveMeta(meta)
+    },
+
+    async deleteWithProgress(folderId, onProgress) {
+        const meta = loadMeta()
+        const toDelete = []
+        const collect = (id) => {
+            const f = meta.folders.find(x => x.id === id)
+            if (!f) return
+            toDelete.push(f)
+            meta.folders.filter(x => x.parentId === id).forEach(child => collect(child.id))
+        }
+        collect(folderId)
+
+        const allFiles = toDelete.flatMap(f => f.files)
+        const keepMarkers = toDelete.map(f => f.path + '/.keep')
+        const allPaths = [...allFiles.map(f => f.path), ...keepMarkers]
+        const total = allPaths.length || 1
+        let done = 0
+
+        for (const path of allPaths) {
+            await vaultAPI.deleteFile(path).catch(() => {})
+            done++
+            if (onProgress) onProgress(done, total)
+        }
 
         const deleteIds = new Set(toDelete.map(f => f.id))
         meta.folders = meta.folders.filter(f => !deleteIds.has(f.id))
