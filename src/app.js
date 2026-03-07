@@ -1150,47 +1150,43 @@ export class ThoughtCollector {
         if (e.key === 'Tab') {
             e.preventDefault()
             const lineStart = val.lastIndexOf('\n', start - 1) + 1
-            const currentLine = val.slice(lineStart, val.indexOf('\n', start) === -1 ? val.length : val.indexOf('\n', start))
+            const lineEnd = val.indexOf('\n', start) === -1 ? val.length : val.indexOf('\n', start)
+            const currentLine = val.slice(lineStart, lineEnd)
             const isList = /^\s*([-*+]|\d+[.)]) /.test(currentLine)
 
             if (isList) {
                 if (e.shiftKey) {
-                    // Dedent: remove up to 2 spaces or 1 tab from start of line
-                    const dedented = currentLine.replace(/^  |^\t/, '')
-                    if (dedented !== currentLine) {
-                        const removed = currentLine.length - dedented.length
-                        const lineEnd = val.indexOf('\n', lineStart)
-                        const newVal = val.slice(0, lineStart) + dedented + (lineEnd === -1 ? '' : val.slice(lineEnd))
-                        textarea.value = newVal
-                        const newPos = Math.max(lineStart, start - removed)
-                        textarea.setSelectionRange(newPos, newPos)
-                        textarea.dispatchEvent(new Event('input'))
-                    }
+                    // Dedent: remove exactly 2 spaces from start (one indent level)
+                    const dedented = currentLine.replace(/^  /, '')
+                    if (dedented === currentLine) return  // already at root level
+                    const removed = 2
+                    const newVal = val.slice(0, lineStart) + dedented + val.slice(lineEnd)
+                    textarea.value = newVal
+                    textarea.setSelectionRange(Math.max(lineStart, start - removed), Math.max(lineStart, start - removed))
+                    textarea.dispatchEvent(new Event('input'))
                 } else {
-                    // Indent: add 2 spaces
-                    const lineEnd = val.indexOf('\n', lineStart)
-                    const newVal = val.slice(0, lineStart) + '  ' + currentLine + (lineEnd === -1 ? '' : val.slice(lineEnd))
+                    // Indent: prepend 2 spaces (one level deeper)
+                    const newVal = val.slice(0, lineStart) + '  ' + currentLine + val.slice(lineEnd)
                     textarea.value = newVal
                     textarea.setSelectionRange(start + 2, start + 2)
                     textarea.dispatchEvent(new Event('input'))
                 }
             } else {
-                // Regular tab: insert 4 spaces or shift-tab dedents
+                // Regular tab: insert 2 spaces or shift-tab dedents
                 if (e.shiftKey) {
-                    const dedented = currentLine.replace(/^    |^\t/, '')
+                    const dedented = currentLine.replace(/^  /, '')
                     if (dedented !== currentLine) {
                         const removed = currentLine.length - dedented.length
-                        const lineEnd = val.indexOf('\n', lineStart)
-                        const newVal = val.slice(0, lineStart) + dedented + (lineEnd === -1 ? '' : val.slice(lineEnd))
+                        const newVal = val.slice(0, lineStart) + dedented + val.slice(lineEnd)
                         textarea.value = newVal
                         textarea.setSelectionRange(Math.max(lineStart, start - removed), Math.max(lineStart, start - removed))
                         textarea.dispatchEvent(new Event('input'))
                     }
                 } else {
-                    const insertion = '    '
+                    const insertion = '  '
                     const newVal = val.slice(0, start) + insertion + val.slice(end)
                     textarea.value = newVal
-                    textarea.setSelectionRange(start + 4, start + 4)
+                    textarea.setSelectionRange(start + 2, start + 2)
                     textarea.dispatchEvent(new Event('input'))
                 }
             }
