@@ -2414,27 +2414,71 @@ body {
     height: 14px;
     flex-shrink: 0;
     margin: 0;
-    margin-top: 0.2em;
+    margin-top: 0.25em;
+    vertical-align: top;
 }
 
+/* Task list: remove bullet, no extra left padding */
 .editor-preview ul:has(li > input[type="checkbox"]) {
     list-style: none;
     padding-left: 0.25rem;
 }
 
+/* Each task item is a flex row so text wraps cleanly */
 .editor-preview li:has(> input[type="checkbox"]) {
     display: flex;
     flex-wrap: wrap;
     align-items: flex-start;
     gap: 0 0.5rem;
+    line-height: 1.6;
+}
+
+/* The text content after the checkbox fills remaining space and wraps */
+.editor-preview li:has(> input[type="checkbox"]) > p,
+.editor-preview li:has(> input[type="checkbox"]) > span {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+}
+
+/* Checked task items get a subtle strikethrough */
+.editor-preview li:has(> input[type="checkbox"]:checked) {
+    opacity: 0.65;
+    text-decoration: line-through;
+    text-decoration-color: var(--nc-text-dim);
+}
+.editor-preview li:has(> input[type="checkbox"]:checked) input[type="checkbox"] {
+    text-decoration: none;
+    opacity: 1;
 }
 
 /* nested lists break onto a new line, indented past the checkbox */
 .editor-preview li:has(> input[type="checkbox"]) > ul,
 .editor-preview li:has(> input[type="checkbox"]) > ol {
     flex-basis: 100%;
-    margin: 0.1rem 0 0 calc(14px + 0.5rem);
+    margin: 0.2rem 0 0 calc(14px + 0.5rem);
     padding-left: 0.75rem;
+}
+
+/* ── Nested list indentation in preview ─────────────────────── */
+.editor-preview ul ul,
+.editor-preview ul ol,
+.editor-preview ol ul,
+.editor-preview ol ol {
+    padding-left: 1.4rem;
+    margin: 0.15rem 0;
+}
+
+.editor-preview ul ul li::marker {
+    content: "◦ ";
+    color: var(--t-preview-marker-ul, var(--nc-red));
+    opacity: 0.75;
+}
+
+.editor-preview ul ul ul li::marker {
+    content: "▪ ";
+    color: var(--t-preview-marker-ul, var(--nc-red));
+    opacity: 0.55;
 }
 
 /* ── Link toolbar (floating) ─────────────────────────────────── */
@@ -2508,6 +2552,206 @@ body {
 #pdf-btn {
     padding: 0.65rem 0.9rem;
     font-size: 0.7rem;
+}
+
+/* ── Save indicator / blocker ────────────────────────────────── */
+.saving-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 9000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(3px);
+}
+
+.saving-overlay-box {
+    background: var(--nc-bg-dark, #1e293b);
+    border: 1px solid var(--t-accent, var(--nc-red));
+    padding: 1.5rem 2.5rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    box-shadow: 0 0 32px rgba(0,0,0,0.4);
+}
+
+.saving-overlay-box .saving-label {
+    font-family: var(--t-font-heading);
+    color: var(--t-accent, var(--nc-red));
+    font-size: 0.85rem;
+    letter-spacing: 0.15em;
+    animation: blink 0.9s step-end infinite;
+}
+
+/* ── Drag-and-drop move for file/folder cards ────────────────── */
+.folder-card[draggable="true"],
+.file-card[draggable="true"],
+.subfolder-card[draggable="true"] {
+    cursor: grab;
+}
+
+.folder-card[draggable="true"]:active,
+.file-card[draggable="true"]:active,
+.subfolder-card[draggable="true"]:active {
+    cursor: grabbing;
+}
+
+.folder-card.drag-dragging,
+.file-card.drag-dragging,
+.subfolder-card.drag-dragging {
+    opacity: 0.38;
+    outline: 2px dashed var(--t-accent, var(--nc-red));
+    outline-offset: -2px;
+}
+
+.folder-card.drag-target-over,
+.subfolder-card.drag-target-over {
+    outline: 2px solid var(--t-accent2, var(--nc-cyan));
+    outline-offset: -2px;
+    background: rgba(0, 245, 255, 0.06);
+}
+
+/* Drop zone indicator between cards */
+.drop-zone {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--t-accent2, var(--nc-cyan));
+    margin: -2px 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+    pointer-events: none;
+}
+
+.drop-zone.active {
+    opacity: 1;
+}
+
+/* ── Move context menu ───────────────────────────────────────── */
+.move-menu-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 9998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(3px);
+}
+
+.move-menu-box {
+    background: var(--nc-bg-dark, #1e293b);
+    border: 1px solid var(--t-card-border);
+    box-shadow: 0 0 32px var(--t-accent);
+    padding: 1.5rem;
+    min-width: 280px;
+    max-width: 480px;
+    width: 90%;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.move-menu-title {
+    font-family: var(--t-font-heading);
+    color: var(--t-accent);
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    flex-shrink: 0;
+}
+
+.move-menu-search {
+    background: var(--t-textarea-bg);
+    border: 1px solid var(--t-textarea-border);
+    color: var(--nc-text);
+    padding: 0.4rem 0.65rem;
+    font-family: var(--t-font-editor);
+    font-size: 0.82rem;
+    outline: none;
+    width: 100%;
+    flex-shrink: 0;
+    transition: border-color 0.15s;
+}
+
+.move-menu-search:focus {
+    border-color: var(--t-accent);
+}
+
+.move-menu-list {
+    overflow-y: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.move-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.65rem;
+    background: none;
+    border: none;
+    color: var(--nc-text);
+    font-family: var(--t-font-ui);
+    font-size: 0.82rem;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.12s, color 0.12s;
+    width: 100%;
+}
+
+.move-menu-item:hover {
+    background: rgba(0,0,0,0.06);
+    color: var(--t-accent2, var(--nc-cyan));
+}
+
+.move-menu-item .move-menu-depth {
+    color: var(--nc-text-dim);
+    font-size: 0.72rem;
+    flex-shrink: 0;
+}
+
+.move-menu-item .move-menu-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.move-menu-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: flex-end;
+    flex-shrink: 0;
+}
+
+/* ── File/folder cards: show move button on hover ────────────── */
+.move-item-btn {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--nc-text-dim);
+    font-size: 0.75rem;
+    padding: 0.2rem 0.45rem;
+    cursor: pointer;
+    font-family: 'Share Tech Mono', monospace;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    line-height: 1;
+    opacity: 0;
+}
+
+.folder-card:hover .move-item-btn,
+.file-card:hover .move-item-btn,
+.subfolder-card:hover .move-item-btn {
+    opacity: 1;
+}
+
+.move-item-btn:hover {
+    color: var(--t-accent2, var(--nc-cyan));
+    border-color: var(--t-accent2, var(--nc-cyan));
+    background: rgba(0, 245, 255, 0.08);
 }
 
 /* ── Mobile theme picker: better layout ──────────────────────── */
