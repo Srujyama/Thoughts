@@ -55,6 +55,7 @@ export class ThoughtCollector {
         this.currentFolder = null
         this.currentFile = null
         this.editorDirty = false
+        this._saving = false
         this.editorMode = this._isMobile()
             ? 'edit'
             : (localStorage.getItem(EDITOR_MODE_KEY) || 'split')
@@ -72,6 +73,10 @@ export class ThoughtCollector {
 
         this._escHandler = async (e) => {
             if (e.key === 'Escape') {
+                if (this._saving) {
+                    this._toast('> PLEASE WAIT — SAVE IN PROGRESS...')
+                    return
+                }
                 if (this.view === 'editor') {
                     if (this.editorDirty) {
                         const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
@@ -338,6 +343,7 @@ export class ThoughtCollector {
 
         // Home logo
         this.container.querySelector('#go-home').addEventListener('click', async () => {
+            if (this._saving) { this._toast('> PLEASE WAIT — SAVE IN PROGRESS...'); return }
             if (this.editorDirty) {
                 const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                 if (!ok) return
@@ -349,6 +355,7 @@ export class ThoughtCollector {
         // Breadcrumb folder links
         this.container.querySelectorAll('.breadcrumb-link[data-folder-id]').forEach(btn => {
             btn.addEventListener('click', async () => {
+                if (this._saving) { this._toast('> PLEASE WAIT — SAVE IN PROGRESS...'); return }
                 if (this.editorDirty) {
                     const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                     if (!ok) return
@@ -380,6 +387,7 @@ export class ThoughtCollector {
                     this._toggleSidebarFolder(folderId)
                     return
                 }
+                if (this._saving) { this._toast('> PLEASE WAIT — SAVE IN PROGRESS...'); return }
                 if (this.editorDirty) {
                     const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                     if (!ok) return
@@ -402,6 +410,7 @@ export class ThoughtCollector {
         this.container.querySelectorAll('.sidebar-file-dot').forEach(btn => {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation()
+                if (this._saving) { this._toast('> PLEASE WAIT — SAVE IN PROGRESS...'); return }
                 if (this.editorDirty) {
                     const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                     if (!ok) return
@@ -492,13 +501,14 @@ export class ThoughtCollector {
     _paintFolders(folders) {
         const folderCards = folders.length
             ? folders.map((f) => `
-                <div class="folder-card" data-id="${f.id}">
+                <div class="folder-card" data-id="${f.id}" draggable="true">
                     <div class="folder-icon">▶</div>
                     <div class="folder-info">
                         <span class="folder-name">${this._esc(f.name)}</span>
                         <span class="folder-meta">${f.files.length} file${f.files.length !== 1 ? 's' : ''}</span>
                     </div>
                     <div class="folder-actions">
+                        <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="folder" title="Move">mv</button>
                         <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename">rn</button>
                         <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete">x</button>
                     </div>
@@ -512,10 +522,17 @@ export class ThoughtCollector {
         const body = `
             <div class="toolbar">
                 <span class="section-label">// FOLDERS</span>
-                <button class="cyber-btn compact-btn" id="new-folder-btn">
-                    <span class="btn-text">+ NEW FOLDER</span>
-                    <span class="btn-glow"></span>
-                </button>
+                <div class="toolbar-actions">
+                    <button class="cyber-btn compact-btn" id="upload-root-folder-btn" title="Upload folder(s) of .md files to root">
+                        <span class="btn-text">↑ UPLOAD FOLDER</span>
+                        <span class="btn-glow"></span>
+                    </button>
+                    <input type="file" id="root-folder-file-input" webkitdirectory multiple style="display:none">
+                    <button class="cyber-btn compact-btn" id="new-folder-btn">
+                        <span class="btn-text">+ NEW FOLDER</span>
+                        <span class="btn-glow"></span>
+                    </button>
+                </div>
             </div>
             <div class="folder-grid" id="folder-grid">${folderCards}</div>
         `
@@ -526,6 +543,12 @@ export class ThoughtCollector {
         this.container.querySelector('#new-folder-btn').addEventListener('click', () => {
             this._promptNewFolder(null)
         })
+
+        // Upload folder(s) to root
+        const uploadRootBtn = this.container.querySelector('#upload-root-folder-btn')
+        const rootFolderInput = this.container.querySelector('#root-folder-file-input')
+        uploadRootBtn.addEventListener('click', () => rootFolderInput.click())
+        rootFolderInput.addEventListener('change', () => this._handleRootFolderUpload(rootFolderInput))
 
         this.container.querySelectorAll('.folder-card').forEach((card) => {
             card.addEventListener('click', (e) => {
@@ -548,6 +571,16 @@ export class ThoughtCollector {
                 this._deleteFolder(btn.dataset.id)
             })
         })
+
+        this.container.querySelectorAll('.move-item-btn[data-type="folder"]').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                this._promptMoveFolder(btn.dataset.id)
+            })
+        })
+
+        // Drag-and-drop reordering / reparenting on folder cards
+        this._bindFolderDragDrop(this.container.querySelector('#folder-grid'), 'root')
     }
 
     async _promptNewFolder(parentId) {
@@ -635,13 +668,14 @@ export class ThoughtCollector {
         const files = folder.files
 
         const subfolderCards = subfolders.map(f => `
-            <div class="folder-card subfolder-card" data-id="${f.id}">
+            <div class="folder-card subfolder-card" data-id="${f.id}" draggable="true">
                 <div class="folder-icon">▶</div>
                 <div class="folder-info">
                     <span class="folder-name">${this._esc(f.name)}</span>
                     <span class="folder-meta">${f.files.length} file${f.files.length !== 1 ? 's' : ''}</span>
                 </div>
                 <div class="folder-actions">
+                    <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="folder" title="Move">mv</button>
                     <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename">rn</button>
                     <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete">x</button>
                 </div>
@@ -649,13 +683,14 @@ export class ThoughtCollector {
         `).join('')
 
         const fileCards = files.map((f) => `
-            <div class="file-card" data-id="${f.id}">
+            <div class="file-card" data-id="${f.id}" draggable="true">
                 <div class="file-icon">#</div>
                 <div class="file-info">
                     <span class="file-title">${this._esc(f.title)}</span>
                     <span class="file-meta">// ${this._relTime(f.updated_at)}</span>
                 </div>
                 <div class="file-actions">
+                    <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="file" title="Move">mv</button>
                     <button class="icon-btn delete-file-btn" data-id="${f.id}" title="Delete">x</button>
                 </div>
             </div>
@@ -773,6 +808,52 @@ export class ThoughtCollector {
                 this._deleteFile(btn.dataset.id)
             })
         })
+
+        // Move buttons
+        this.container.querySelectorAll('.move-item-btn[data-type="folder"]').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                this._promptMoveFolder(btn.dataset.id)
+            })
+        })
+
+        this.container.querySelectorAll('.move-item-btn[data-type="file"]').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                this._promptMoveFile(btn.dataset.id, folder.id)
+            })
+        })
+
+        // Drag-and-drop
+        this._bindFolderDragDrop(fileList, folder.id)
+
+        // Allow dropping files onto folder cards to move them
+        this.container.querySelectorAll('.subfolder-card').forEach(card => {
+            card.addEventListener('dragover', (e) => {
+                // If dragging a file over a folder, allow drop
+                if (e.dataTransfer.types.includes('application/file-id')) {
+                    e.preventDefault()
+                    card.classList.add('drag-target-over')
+                }
+            })
+            card.addEventListener('dragleave', () => {
+                card.classList.remove('drag-target-over')
+            })
+            card.addEventListener('drop', async (e) => {
+                card.classList.remove('drag-target-over')
+                const fileId = e.dataTransfer.getData('application/file-id')
+                if (!fileId) return
+                e.preventDefault()
+                const targetFolderId = card.dataset.id
+                try {
+                    await filesAPI.move(folder.id, fileId, targetFolderId)
+                    this.currentFolder = foldersAPI.list().find(f => f.id === folder.id)
+                    this._render()
+                } catch (err) {
+                    this._toast(`> MOVE ERROR: ${err.message}`)
+                }
+            })
+        })
     }
 
     // ── .md file upload with progress ────────────────────────
@@ -862,6 +943,261 @@ export class ThoughtCollector {
             this._render()
         }
         if (input.value !== undefined) input.value = ''
+    }
+
+    // ── Root folder upload (multiple folders → root level) ────────
+    async _handleRootFolderUpload(input) {
+        const allFiles = Array.from(input.files || [])
+        const mdFiles = allFiles.filter(f => f.name.endsWith('.md'))
+        if (!mdFiles.length) {
+            this._toast('> NO .MD FILES FOUND IN SELECTED FOLDER(S)')
+            if (input.value !== undefined) input.value = ''
+            return
+        }
+
+        const total = mdFiles.length
+        this._showProgressToast('Uploading', total)
+        let succeeded = 0
+        let errors = 0
+
+        for (let i = 0; i < mdFiles.length; i++) {
+            const f = mdFiles[i]
+            try {
+                const relPath = f.webkitRelativePath || f.name
+                const parts = relPath.split('/')
+                // parts[0] is the selected root folder name, parts[1..n-1] are subfolders, last is file
+                const folderParts = parts.slice(0, -1)  // all segments except filename
+                const fileName = parts[parts.length - 1]
+
+                // Build/find folder hierarchy starting at root (parentId = null)
+                let targetFolder = null
+                let parentId = null
+
+                for (const seg of folderParts) {
+                    if (!seg) continue
+                    const meta_folders = foldersAPI.list()
+                    let existing = parentId
+                        ? foldersAPI.listChildren(parentId).find(c =>
+                            c.name.toLowerCase() === seg.toLowerCase() ||
+                            c.path.endsWith('/' + seg.toLowerCase().replace(/\s+/g, '-')))
+                        : foldersAPI.listRoots().find(c =>
+                            c.name.toLowerCase() === seg.toLowerCase() ||
+                            c.path === seg.toLowerCase().replace(/\s+/g, '-'))
+
+                    if (!existing) {
+                        existing = await foldersAPI.create(seg, parentId)
+                    }
+                    targetFolder = foldersAPI.list().find(x => x.id === existing.id) || existing
+                    parentId = targetFolder.id
+                }
+
+                if (!targetFolder) {
+                    errors++
+                    this._updateProgressToast('Uploading', i + 1, total)
+                    continue
+                }
+
+                const content = await f.text()
+                const title = fileName.replace(/\.md$/i, '').replace(/-/g, ' ')
+                await filesAPI.create(targetFolder.id, title, content)
+                succeeded++
+                this._updateProgressToast('Uploading', i + 1, total)
+            } catch (err) {
+                errors++
+                this._toast(`> ERROR: ${f.name}: ${err.message}`)
+                this._updateProgressToast('Uploading', i + 1, total)
+            }
+        }
+
+        this._hideProgressToast()
+        if (succeeded) {
+            this._toast(`> UPLOADED ${succeeded} FILE${succeeded > 1 ? 'S' : ''}${errors ? `, ${errors} FAILED` : ''}`)
+            this._render()
+        } else if (errors) {
+            this._toast(`> UPLOAD FAILED: ${errors} ERROR${errors > 1 ? 'S' : ''}`)
+        }
+        if (input.value !== undefined) input.value = ''
+    }
+
+    // ── Move folder dialog ─────────────────────────────────────
+    async _promptMoveFolder(folderId) {
+        const folder = foldersAPI.list().find(f => f.id === folderId)
+        if (!folder) return
+
+        const allFolders = foldersAPI.list().filter(f => f.id !== folderId)
+        const target = await this._showMoveMenu(
+            `MOVE FOLDER: ${folder.name}`,
+            allFolders,
+            true   // include "Root" option
+        )
+        if (target === undefined) return  // cancelled
+
+        try {
+            await foldersAPI.move(folderId, target)
+            this._render()
+        } catch (err) {
+            this._toast(`> MOVE ERROR: ${err.message}`)
+        }
+    }
+
+    // ── Move file dialog ───────────────────────────────────────
+    async _promptMoveFile(fileId, sourceFolderId) {
+        const file = this.currentFolder?.files.find(f => f.id === fileId)
+            || foldersAPI.list().flatMap(f => f.files).find(f => f.id === fileId)
+        if (!file) return
+
+        const allFolders = foldersAPI.list().filter(f => f.id !== sourceFolderId)
+        const target = await this._showMoveMenu(
+            `MOVE FILE: ${file.title}`,
+            allFolders,
+            false  // no "Root" for files (they must live in a folder)
+        )
+        if (target === undefined || target === null) return
+
+        try {
+            await filesAPI.move(sourceFolderId, fileId, target)
+            this.currentFolder = foldersAPI.list().find(f => f.id === sourceFolderId)
+            this._render()
+        } catch (err) {
+            this._toast(`> MOVE ERROR: ${err.message}`)
+        }
+    }
+
+    // ── Generic move-target menu ───────────────────────────────
+    _showMoveMenu(title, folders, includeRoot = false) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div')
+            overlay.className = 'move-menu-overlay'
+
+            // Sort folders by path depth then name
+            const sorted = [...folders].sort((a, b) => {
+                const da = a.path.split('/').length
+                const db = b.path.split('/').length
+                if (da !== db) return da - db
+                return a.name.localeCompare(b.name)
+            })
+
+            const rootOption = includeRoot
+                ? `<button class="move-menu-item" data-id="__root__">
+                    <span class="move-menu-depth">/ </span>
+                    <span class="move-menu-name">Root (top level)</span>
+                   </button>`
+                : ''
+
+            const folderItems = sorted.map(f => {
+                const depth = f.path.split('/').length
+                const prefix = '  '.repeat(depth - 1)
+                return `<button class="move-menu-item" data-id="${f.id}">
+                    <span class="move-menu-depth">${prefix}</span>
+                    <span class="move-menu-name">${this._esc(f.name)}</span>
+                   </button>`
+            }).join('')
+
+            overlay.innerHTML = `
+                <div class="move-menu-box">
+                    <div class="move-menu-title">${title}</div>
+                    <input type="text" class="move-menu-search" placeholder="Search folders...">
+                    <div class="move-menu-list">${rootOption}${folderItems}</div>
+                    <div class="move-menu-actions">
+                        <button class="modal-btn modal-cancel">CANCEL</button>
+                    </div>
+                </div>
+            `
+            document.body.appendChild(overlay)
+
+            const searchInput = overlay.querySelector('.move-menu-search')
+            const listEl = overlay.querySelector('.move-menu-list')
+
+            searchInput.focus()
+
+            searchInput.addEventListener('input', () => {
+                const q = searchInput.value.toLowerCase()
+                overlay.querySelectorAll('.move-menu-item').forEach(btn => {
+                    const name = btn.querySelector('.move-menu-name').textContent.toLowerCase()
+                    btn.style.display = (!q || name.includes(q)) ? '' : 'none'
+                })
+            })
+
+            overlay.querySelectorAll('.move-menu-item').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    overlay.remove()
+                    const id = btn.dataset.id
+                    resolve(id === '__root__' ? null : id)
+                })
+            })
+
+            overlay.querySelector('.modal-cancel').addEventListener('click', () => {
+                overlay.remove()
+                resolve(undefined)
+            })
+
+            overlay.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') { overlay.remove(); resolve(undefined) }
+            })
+        })
+    }
+
+    // ── Drag-and-drop folder/file card reordering ──────────────
+    _bindFolderDragDrop(container, contextParentId) {
+        if (!container) return
+        let draggingCard = null
+        let draggingId = null
+
+        container.querySelectorAll('.folder-card, .subfolder-card').forEach(card => {
+            card.addEventListener('dragstart', (e) => {
+                draggingCard = card
+                draggingId = card.dataset.id
+                card.classList.add('drag-dragging')
+                e.dataTransfer.effectAllowed = 'move'
+                e.dataTransfer.setData('text/plain', draggingId)
+            })
+            card.addEventListener('dragend', () => {
+                card.classList.remove('drag-dragging')
+                container.querySelectorAll('.drag-target-over').forEach(el => el.classList.remove('drag-target-over'))
+                draggingCard = null
+                draggingId = null
+            })
+            card.addEventListener('dragover', (e) => {
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'move'
+                if (card !== draggingCard) {
+                    container.querySelectorAll('.drag-target-over').forEach(el => el.classList.remove('drag-target-over'))
+                    card.classList.add('drag-target-over')
+                }
+            })
+            card.addEventListener('dragleave', () => {
+                card.classList.remove('drag-target-over')
+            })
+            card.addEventListener('drop', async (e) => {
+                e.preventDefault()
+                card.classList.remove('drag-target-over')
+                const targetId = card.dataset.id
+                if (!draggingId || draggingId === targetId) return
+                try {
+                    await foldersAPI.move(draggingId, targetId)
+                    this._render()
+                } catch (err) {
+                    this._toast(`> MOVE ERROR: ${err.message}`)
+                }
+            })
+        })
+
+        // File cards inside the same container
+        container.querySelectorAll('.file-card').forEach(card => {
+            card.setAttribute('draggable', 'true')
+            card.addEventListener('dragstart', (e) => {
+                draggingCard = card
+                draggingId = card.dataset.id
+                card.classList.add('drag-dragging')
+                e.dataTransfer.effectAllowed = 'move'
+                e.dataTransfer.setData('application/file-id', card.dataset.id)
+            })
+            card.addEventListener('dragend', () => {
+                card.classList.remove('drag-dragging')
+                draggingCard = null
+                draggingId = null
+            })
+        })
     }
 
     async _promptNewFile() {
@@ -1045,8 +1381,16 @@ export class ThoughtCollector {
         })
 
         const doSave = () => {
+            if (this._saving) return  // prevent concurrent saves
+            this._saving = true
             saveBtn.disabled = true
             saveBtn.querySelector('.btn-text').textContent = 'SAVING...'
+            saveStatus.textContent = '// saving...'
+            saveStatus.className = 'save-status unsaved'
+
+            // Show saving overlay to prevent accidental navigation
+            this._showSavingOverlay()
+
             filesAPI.update(folder.id, file.id, {
                 title: titleInput.value,
                 content: contentArea.value,
@@ -1060,8 +1404,10 @@ export class ThoughtCollector {
                 })
                 .catch(err => this._toast(`> SAVE ERROR: ${err.message}`))
                 .finally(() => {
+                    this._saving = false
                     saveBtn.disabled = false
                     saveBtn.querySelector('.btn-text').textContent = 'SAVE'
+                    this._hideSavingOverlay()
                 })
         }
 
@@ -1095,18 +1441,37 @@ export class ThoughtCollector {
                 const taskPart = listMatch[3] || ''
                 const lineContent = currentLine.slice(listMatch[0].length)
 
-                // If line is empty (just the bullet), remove the bullet and dedent
+                // If line is empty (just the bullet), remove the bullet and dedent / exit list
                 if (!lineContent.trim()) {
                     e.preventDefault()
-                    // Remove the empty list marker
-                    const newVal = val.slice(0, lineStart) + '\n' + val.slice(start)
-                    textarea.value = newVal
-                    const newPos = lineStart + 1
-                    textarea.setSelectionRange(newPos, newPos)
+                    if (indent.length >= 2) {
+                        // Dedent one level instead of exiting
+                        const newIndent = indent.slice(2)
+                        const newLine = newIndent + bullet + ' ' + (taskPart || '')
+                        const newVal = val.slice(0, lineStart) + newLine + val.slice(start)
+                        const newPos = lineStart + newLine.length
+                        textarea.value = newVal
+                        textarea.setSelectionRange(newPos, newPos)
+                    } else {
+                        // Exit list — remove bullet, leave blank line
+                        const newVal = val.slice(0, lineStart) + '\n' + val.slice(start)
+                        textarea.value = newVal
+                        textarea.setSelectionRange(lineStart + 1, lineStart + 1)
+                    }
                     textarea.dispatchEvent(new Event('input'))
                     return
                 }
 
+                // If cursor is at the very start of the line content (right after bullet),
+                // pressing Enter pushes current bullet content down and leaves blank first bullet
+                if (start === lineStart + listMatch[0].length - (lineContent.length > 0 ? lineContent.length : 0)) {
+                    // cursor is at the beginning of text after bullet
+                    // handled normally — fall through to continue-list
+                }
+
+                // If cursor is at the beginning of the line (before bullet content),
+                // split: first bullet stays with text from cursor onward, new bullet above has no content
+                // This is the standard "Enter pushes content down" behavior which the continue-list handles
                 e.preventDefault()
                 // Continue the list
                 let nextBullet = bullet
@@ -1152,13 +1517,14 @@ export class ThoughtCollector {
             const lineStart = val.lastIndexOf('\n', start - 1) + 1
             const lineEnd = val.indexOf('\n', start) === -1 ? val.length : val.indexOf('\n', start)
             const currentLine = val.slice(lineStart, lineEnd)
-            const isList = /^\s*([-*+]|\d+[.)]) /.test(currentLine)
+            const listItemMatch = currentLine.match(/^(\s*)([-*+]|\d+[.)]) /)
 
-            if (isList) {
+            if (listItemMatch) {
+                const currentIndent = listItemMatch[1]
                 if (e.shiftKey) {
-                    // Dedent: remove exactly 2 spaces from start (one indent level)
-                    const dedented = currentLine.replace(/^  /, '')
-                    if (dedented === currentLine) return  // already at root level
+                    // Dedent: remove 2 spaces from start (one indent level)
+                    if (currentIndent.length < 2) return  // already at root level
+                    const dedented = currentLine.slice(2)
                     const removed = 2
                     const newVal = val.slice(0, lineStart) + dedented + val.slice(lineEnd)
                     textarea.value = newVal
@@ -1494,6 +1860,27 @@ export class ThoughtCollector {
             const contentArea = editorZone.querySelector('#file-content')
             if (contentArea) setTimeout(() => contentArea.focus(), 50)
         }
+    }
+
+    // ── Saving overlay (blocks navigation during save) ────────
+    _showSavingOverlay() {
+        if (document.getElementById('saving-overlay')) return
+        const el = document.createElement('div')
+        el.id = 'saving-overlay'
+        el.className = 'saving-overlay'
+        el.innerHTML = `
+            <div class="saving-overlay-box">
+                <span class="saving-label">> SAVING...</span>
+            </div>
+        `
+        // Prevent clicks from passing through
+        el.addEventListener('click', (e) => e.stopPropagation())
+        document.body.appendChild(el)
+    }
+
+    _hideSavingOverlay() {
+        const el = document.getElementById('saving-overlay')
+        if (el) el.remove()
     }
 
     // ── Progress toast ────────────────────────────────────────

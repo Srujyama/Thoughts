@@ -310,6 +310,34 @@ export const foldersAPI = {
         return folder
     },
 
+    // Move a folder to a new parent (or to root if newParentId is null)
+    async move(folderId, newParentId) {
+        const meta = loadMeta()
+        const folder = meta.folders.find(f => f.id === folderId)
+        if (!folder) throw new Error('Folder not found')
+
+        // Prevent moving into itself or a descendant
+        const isDescendant = (parentId, targetId) => {
+            if (!parentId) return false
+            if (parentId === targetId) return true
+            const parent = meta.folders.find(f => f.id === parentId)
+            return parent ? isDescendant(parent.parentId, targetId) : false
+        }
+        if (newParentId && (newParentId === folderId || isDescendant(newParentId, folderId))) {
+            throw new Error('Cannot move folder into itself or a descendant')
+        }
+
+        folder.parentId = newParentId || null
+
+        // Recompute path
+        const newParent = newParentId ? meta.folders.find(f => f.id === newParentId) : null
+        const folderSlug = folder.path.split('/').pop()
+        folder.path = newParent ? `${newParent.path}/${folderSlug}` : folderSlug
+
+        saveMeta(meta)
+        return folder
+    },
+
     async delete(folderId) {
         const meta = loadMeta()
         const toDelete = []
@@ -432,5 +460,33 @@ export const filesAPI = {
         if (file) await vaultAPI.deleteFile(file.path).catch(() => {})
         folder.files = folder.files.filter(f => f.id !== fileId)
         saveMeta(meta)
+    },
+
+    // Move a file to a different folder
+    async move(sourceFolderId, fileId, targetFolderId) {
+        const meta = loadMeta()
+        const sourceFolder = meta.folders.find(f => f.id === sourceFolderId)
+        const targetFolder = meta.folders.find(f => f.id === targetFolderId)
+        if (!sourceFolder || !targetFolder) throw new Error('Folder not found')
+        const fileIdx = sourceFolder.files.findIndex(f => f.id === fileId)
+        if (fileIdx === -1) throw new Error('File not found')
+
+        const file = sourceFolder.files[fileIdx]
+        const fileName = file.path.split('/').pop()
+        const newPath = `${targetFolder.path}/${fileName}`
+
+        // Read content, write to new path, delete old
+        let content = file.content || ''
+        if (!file.contentLoaded) {
+            try { content = await vaultAPI.readFile(file.path) } catch { /* use empty */ }
+        }
+        await vaultAPI.writeFile(newPath, content)
+        await vaultAPI.deleteFile(file.path).catch(() => {})
+
+        file.path = newPath
+        sourceFolder.files.splice(fileIdx, 1)
+        targetFolder.files.unshift(file)
+        saveMeta(meta)
+        return file
     },
 }
