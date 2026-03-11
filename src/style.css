@@ -1713,6 +1713,13 @@ body {
     background: rgba(0,0,0,0.06);
 }
 
+.sidebar-folder.sidebar-drop-target {
+    outline: 2px solid var(--t-accent2, var(--nc-cyan));
+    outline-offset: -2px;
+    background: rgba(0, 245, 255, 0.10);
+    color: var(--t-accent2, var(--nc-cyan));
+}
+
 .sidebar-folder.active {
     background: var(--t-mode-btn-active-bg, var(--nc-red));
     color: var(--t-mode-btn-active-color, var(--nc-bg-void));
