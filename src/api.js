@@ -314,7 +314,7 @@ export const foldersAPI = {
     async move(folderId, newParentId) {
         const meta = loadMeta()
         const folder = meta.folders.find(f => f.id === folderId)
-        if (!folder) throw new Error('Folder not found')
+        if (!folder) return null  // silently no-op if folder is missing (stale reference)
 
         // Prevent moving into itself or a descendant
         const isDescendant = (parentId, targetId) => {
@@ -467,7 +467,7 @@ export const filesAPI = {
         const meta = loadMeta()
         const sourceFolder = meta.folders.find(f => f.id === sourceFolderId)
         const targetFolder = meta.folders.find(f => f.id === targetFolderId)
-        if (!sourceFolder || !targetFolder) throw new Error('Folder not found')
+        if (!sourceFolder || !targetFolder) return null  // silently no-op if folder is missing
         const fileIdx = sourceFolder.files.findIndex(f => f.id === fileId)
         if (fileIdx === -1) throw new Error('File not found')
 

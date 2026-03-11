@@ -276,6 +276,7 @@ export class ThoughtCollector {
                 <div class="sidebar-folder-group">
                     <button class="sidebar-folder ${isActive ? 'active' : ''}"
                             data-folder-id="${f.id}"
+                            data-drop-folder-id="${f.id}"
                             style="padding-left: calc(0.75rem + ${indent}px)"
                             title="${this._esc(f.path)}">
                         <span class="sidebar-toggle" data-toggle-id="${f.id}">${hasChildren ? chevron : ''}</span>
@@ -431,6 +432,63 @@ export class ThoughtCollector {
         if (sidebarNewBtn) {
             sidebarNewBtn.addEventListener('click', () => this._promptNewFolder(null))
         }
+
+        // Sidebar drag-and-drop (drop folders/files onto sidebar items)
+        this._bindSidebarDragDrop()
+    }
+
+    // ── Sidebar drag-and-drop ─────────────────────────────────
+    _bindSidebarDragDrop() {
+        this.container.querySelectorAll('.sidebar-folder[data-drop-folder-id]').forEach(btn => {
+            btn.addEventListener('dragover', (e) => {
+                const hasFolderDrag = e.dataTransfer.types.includes('text/plain') || e.dataTransfer.types.includes('application/folder-id')
+                const hasFileDrag = e.dataTransfer.types.includes('application/file-id')
+                if (hasFolderDrag || hasFileDrag) {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    btn.classList.add('sidebar-drop-target')
+                }
+            })
+            btn.addEventListener('dragleave', (e) => {
+                // Only remove if actually leaving the button (not entering a child)
+                if (!btn.contains(e.relatedTarget)) {
+                    btn.classList.remove('sidebar-drop-target')
+                }
+            })
+            btn.addEventListener('drop', async (e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                btn.classList.remove('sidebar-drop-target')
+                const targetFolderId = btn.dataset.dropFolderId
+
+                const fileId = e.dataTransfer.getData('application/file-id')
+                if (fileId) {
+                    // Moving a file into this sidebar folder
+                    const sourceFolderId = this.currentFolder?.id
+                        || foldersAPI.list().find(f => f.files.some(fi => fi.id === fileId))?.id
+                    if (!sourceFolderId || sourceFolderId === targetFolderId) return
+                    try {
+                        await filesAPI.move(sourceFolderId, fileId, targetFolderId)
+                        this.currentFolder = foldersAPI.list().find(f => f.id === sourceFolderId)
+                        this._render()
+                    } catch (err) {
+                        this._toast(`> MOVE ERROR: ${err.message}`)
+                    }
+                    return
+                }
+
+                const folderId = e.dataTransfer.getData('text/plain') || e.dataTransfer.getData('application/folder-id')
+                if (folderId && folderId !== targetFolderId) {
+                    // Moving a folder into this sidebar folder
+                    try {
+                        await foldersAPI.move(folderId, targetFolderId)
+                        this._render()
+                    } catch (err) {
+                        this._toast(`> MOVE ERROR: ${err.message}`)
+                    }
+                }
+            })
+        })
     }
 
     _toggleSidebarFolder(folderId) {
@@ -485,6 +543,8 @@ export class ThoughtCollector {
                     }
                 })
             })
+            // Re-bind sidebar drag-and-drop after re-render
+            this._bindSidebarDragDrop()
         }
     }
 
@@ -608,6 +668,21 @@ export class ThoughtCollector {
         }
     }
 
+    async _renameFile(fileId) {
+        const file = this.currentFolder?.files.find((f) => f.id === fileId)
+            || foldersAPI.list().flatMap(f => f.files).find(f => f.id === fileId)
+        if (!file) return
+        const name = await this._showModal({ type: 'input', title: 'RENAME FILE', placeholder: 'New name...', defaultValue: file.title })
+        if (!name) return
+        try {
+            await filesAPI.update(this.currentFolder.id, fileId, { title: name })
+            this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
+            this._render()
+        } catch (err) {
+            this._toast(`> ERROR: ${err.message}`)
+        }
+    }
+
     async _deleteFolder(id) {
         const folder = foldersAPI.list().find((f) => f.id === id)
         if (!folder) return
@@ -691,6 +766,7 @@ export class ThoughtCollector {
                 </div>
                 <div class="file-actions">
                     <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="file" title="Move">mv</button>
+                    <button class="icon-btn rename-file-btn" data-id="${f.id}" title="Rename">rn</button>
                     <button class="icon-btn delete-file-btn" data-id="${f.id}" title="Delete">x</button>
                 </div>
             </div>
@@ -806,6 +882,13 @@ export class ThoughtCollector {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation()
                 this._deleteFile(btn.dataset.id)
+            })
+        })
+
+        this.container.querySelectorAll('.rename-file-btn').forEach((btn) => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                this._renameFile(btn.dataset.id)
             })
         })
 
@@ -1173,6 +1256,25 @@ export class ThoughtCollector {
                 card.classList.remove('drag-target-over')
                 const targetId = card.dataset.id
                 if (!draggingId || draggingId === targetId) return
+                // If a file card was dragged onto a folder card, handle as file move (not folder move)
+                if (e.dataTransfer.types.includes('application/file-id')) {
+                    const fileId = e.dataTransfer.getData('application/file-id')
+                    if (!fileId) return
+                    const sourceFolderId = this.currentFolder?.id
+                        || foldersAPI.list().find(f => f.files.some(fi => fi.id === fileId))?.id
+                    if (!sourceFolderId || sourceFolderId === targetId) return
+                    try {
+                        await filesAPI.move(sourceFolderId, fileId, targetId)
+                        this.currentFolder = foldersAPI.list().find(f => f.id === sourceFolderId)
+                        this._render()
+                    } catch (err) {
+                        this._toast(`> MOVE ERROR: ${err.message}`)
+                    }
+                    return
+                }
+                // Folder drag onto folder
+                const folder = foldersAPI.list().find(f => f.id === draggingId)
+                if (!folder) return  // silently ignore if folder not found (stale drag)
                 try {
                     await foldersAPI.move(draggingId, targetId)
                     this._render()
