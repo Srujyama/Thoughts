@@ -6,12 +6,67 @@ const TOKEN_KEY   = 'nc_token'
 const REFRESH_KEY = 'nc_refresh_token'
 const USER_KEY    = 'nc_user'
 
+// ── Session-expired callback (set by main.js to redirect to login) ──
+let _onSessionExpired = null
+
+export function setSessionExpiredHandler(handler) {
+    _onSessionExpired = handler
+}
+
 // ── Token refresh (runs at most once at a time) ───────────────
 let _refreshPromise = null
+let _refreshTimer = null
+
+// Parse JWT to read expiry without a library
+function _parseJwtExp(token) {
+    try {
+        const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
+        return payload.exp || 0
+    } catch { return 0 }
+}
+
+// Schedule a proactive refresh ~60s before the access token expires
+function _scheduleProactiveRefresh() {
+    if (_refreshTimer) clearTimeout(_refreshTimer)
+    const token = localStorage.getItem(TOKEN_KEY)
+    if (!token) return
+
+    const exp = _parseJwtExp(token)
+    if (!exp) return
+
+    const nowSec = Math.floor(Date.now() / 1000)
+    const ttl = exp - nowSec
+    // Refresh 60 seconds before expiry (minimum 10s from now)
+    const delay = Math.max((ttl - 60) * 1000, 10_000)
+
+    _refreshTimer = setTimeout(async () => {
+        try {
+            if (!_refreshPromise) {
+                _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
+            }
+            await _refreshPromise
+        } catch {
+            // Proactive refresh failed — user will be prompted on next request
+        }
+    }, delay)
+}
+
+function _handleSessionExpired() {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(REFRESH_KEY)
+    localStorage.removeItem(USER_KEY)
+    if (_refreshTimer) clearTimeout(_refreshTimer)
+    if (_onSessionExpired) {
+        _onSessionExpired()
+    }
+}
 
 async function _refreshToken() {
     const refreshToken = localStorage.getItem(REFRESH_KEY)
-    if (!refreshToken) throw new Error('No refresh token — please log in again.')
+    if (!refreshToken) {
+        _handleSessionExpired()
+        throw new Error('__SESSION_EXPIRED__')
+    }
 
     const res = await fetch(`${BASE_URL}/auth/refresh`, {
         method: 'POST',
@@ -19,15 +74,14 @@ async function _refreshToken() {
         body: JSON.stringify({ refresh_token: refreshToken }),
     })
     if (!res.ok) {
-        // Refresh failed — clear auth so the app shows the login screen
-        localStorage.removeItem(TOKEN_KEY)
-        localStorage.removeItem(REFRESH_KEY)
-        localStorage.removeItem(USER_KEY)
-        throw new Error('Session expired. Please log in again.')
+        _handleSessionExpired()
+        throw new Error('__SESSION_EXPIRED__')
     }
     const data = await res.json()
     localStorage.setItem(TOKEN_KEY, data.access_token)
     if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
+    // Schedule the next proactive refresh
+    _scheduleProactiveRefresh()
     return data.access_token
 }
 
@@ -45,7 +99,12 @@ async function apiFetch(path, options = {}, _retry = true) {
     // Auto-refresh on 401 then retry once
     if (res.status === 401 && _retry) {
         if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
-        await _refreshPromise
+        try {
+            await _refreshPromise
+        } catch (err) {
+            if (err.message === '__SESSION_EXPIRED__') return null
+            throw err
+        }
         return apiFetch(path, options, false)
     }
 
@@ -80,6 +139,7 @@ export const auth = {
         localStorage.setItem(TOKEN_KEY, data.access_token)
         if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
         localStorage.setItem(USER_KEY, JSON.stringify({ user_id: data.user_id, email: data.email }))
+        _scheduleProactiveRefresh()
         return data
     },
 
@@ -91,10 +151,17 @@ export const auth = {
         localStorage.setItem(TOKEN_KEY, data.access_token)
         if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
         localStorage.setItem(USER_KEY, JSON.stringify({ user_id: data.user_id, email: data.email }))
+        _scheduleProactiveRefresh()
         return data
     },
 
+    // Call on app load to start proactive refresh cycle
+    startRefreshCycle() {
+        _scheduleProactiveRefresh()
+    },
+
     async logout() {
+        if (_refreshTimer) clearTimeout(_refreshTimer)
         try { await apiFetch('/auth/logout', { method: 'POST' }) } catch { /* no-op */ }
         localStorage.removeItem(TOKEN_KEY)
         localStorage.removeItem(REFRESH_KEY)
@@ -129,7 +196,12 @@ export const vaultAPI = {
         let res = await doRead()
         if (res.status === 401) {
             if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
-            await _refreshPromise
+            try {
+                await _refreshPromise
+            } catch (err) {
+                if (err.message === '__SESSION_EXPIRED__') return ''
+                throw err
+            }
             res = await doRead()
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`)

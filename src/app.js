@@ -8,20 +8,17 @@ const SIDEBAR_OPEN_KEY = 'nc_sidebar_open'
 
 const THEMES = [
     { id: 'system',     label: 'System' },
-    { id: 'light',      label: 'Light' },
-    { id: 'dark',       label: 'Dark' },
+    { id: 'white',      label: 'White' },
+    { id: 'black',      label: 'Black' },
     { id: 'cyberpunk',  label: 'Cyberpunk' },
-    { id: 'docs',       label: 'Docs' },
     { id: 'typewriter', label: 'Typewriter' },
-    { id: 'nord',       label: 'Nord' },
-    { id: 'solarized',  label: 'Solarized' },
 ]
 
 // ── System theme media query watcher ──────────────────────────
 let _systemThemeListener = null
 
 function _resolveSystemTheme() {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'black' : 'white'
 }
 
 // ── Hash routing helpers ──────────────────────────────────────
@@ -98,8 +95,12 @@ export class ThoughtCollector {
 
     // ── Theme ─────────────────────────────────────────────────
     _applyTheme(themeId) {
+        // Migrate old theme IDs to new ones
+        const migrations = { light: 'white', dark: 'black', docs: 'white', nord: 'black', solarized: 'white' }
+        if (migrations[themeId]) themeId = migrations[themeId]
+
         const valid = THEMES.find(t => t.id === themeId)
-        if (!valid) return
+        if (!valid) themeId = 'system'
 
         // Remove old system theme listener
         if (_systemThemeListener) {
@@ -117,10 +118,6 @@ export class ThoughtCollector {
             apply()
             _systemThemeListener = apply
             window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', _systemThemeListener)
-        } else if (themeId === 'light') {
-            document.documentElement.setAttribute('data-theme', 'docs')
-        } else if (themeId === 'dark') {
-            document.documentElement.setAttribute('data-theme', 'nord')
         } else {
             document.documentElement.setAttribute('data-theme', themeId)
         }
@@ -194,13 +191,14 @@ export class ThoughtCollector {
     // ── Shared shell ──────────────────────────────────────────
     _shell(bodyHtml, { sidebar = true } = {}) {
         const currentTheme = localStorage.getItem(THEME_KEY) || 'system'
-        const swatches = THEMES.map(t => `
-            <button
-                class="theme-swatch ${t.id === currentTheme ? 'active' : ''}"
-                data-theme="${t.id}"
-                title="${t.label}"
-                aria-label="Switch to ${t.label} theme"
-            ></button>
+        const currentLabel = THEMES.find(t => t.id === currentTheme)?.label || 'System'
+
+        const themeOptions = THEMES.map(t => `
+            <button class="theme-dropdown-item ${t.id === currentTheme ? 'active' : ''}"
+                    data-theme="${t.id}">
+                <span class="theme-dropdown-swatch" data-theme="${t.id}"></span>
+                <span class="theme-dropdown-label">${t.label}</span>
+            </button>
         `).join('')
 
         const sidebarHtml = this._buildSidebarTree(null, 0)
@@ -225,10 +223,17 @@ export class ThoughtCollector {
                         <nav class="breadcrumb" id="breadcrumb">${this._buildBreadcrumb()}</nav>
                     </div>
                     <div class="header-right">
-                        <div class="theme-picker" id="theme-picker">${swatches}</div>
-                        <button class="cyber-btn logout-btn" id="logout-btn">
-                            <span class="btn-text">JACK OUT</span>
-                            <span class="btn-glow"></span>
+                        <div class="theme-picker" id="theme-picker">
+                            <button class="theme-toggle-btn" id="theme-toggle-btn" title="Change theme">
+                                <span class="theme-toggle-swatch" data-theme="${currentTheme}"></span>
+                                <span class="theme-toggle-label">${currentLabel}</span>
+                            </button>
+                            <div class="theme-dropdown" id="theme-dropdown">
+                                ${themeOptions}
+                            </div>
+                        </div>
+                        <button class="header-logout-btn" id="logout-btn" title="Log out">
+                            <span class="btn-text">LOG OUT</span>
                         </button>
                     </div>
                 </header>
@@ -367,15 +372,36 @@ export class ThoughtCollector {
             })
         })
 
-        // Theme picker
-        this.container.querySelectorAll('.theme-swatch').forEach(btn => {
-            btn.addEventListener('click', () => {
-                this._applyTheme(btn.dataset.theme)
-                this.container.querySelectorAll('.theme-swatch').forEach(b => {
-                    b.classList.toggle('active', b.dataset.theme === btn.dataset.theme)
+        // Theme picker (dropdown)
+        const themeToggleBtn = this.container.querySelector('#theme-toggle-btn')
+        const themeDropdown = this.container.querySelector('#theme-dropdown')
+        if (themeToggleBtn && themeDropdown) {
+            themeToggleBtn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                themeDropdown.classList.toggle('open')
+            })
+            // Close dropdown when clicking outside
+            document.addEventListener('click', (e) => {
+                if (!themeDropdown.contains(e.target) && e.target !== themeToggleBtn) {
+                    themeDropdown.classList.remove('open')
+                }
+            })
+            this.container.querySelectorAll('.theme-dropdown-item').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    this._applyTheme(btn.dataset.theme)
+                    themeDropdown.classList.remove('open')
+                    // Update toggle button appearance
+                    const swatch = themeToggleBtn.querySelector('.theme-toggle-swatch')
+                    const label = themeToggleBtn.querySelector('.theme-toggle-label')
+                    if (swatch) swatch.setAttribute('data-theme', btn.dataset.theme)
+                    if (label) label.textContent = THEMES.find(t => t.id === btn.dataset.theme)?.label || ''
+                    // Update active state
+                    this.container.querySelectorAll('.theme-dropdown-item').forEach(b => {
+                        b.classList.toggle('active', b.dataset.theme === btn.dataset.theme)
+                    })
                 })
             })
-        })
+        }
 
         // Sidebar folder clicks (navigate to folder)
         this.container.querySelectorAll('.sidebar-folder').forEach(btn => {
