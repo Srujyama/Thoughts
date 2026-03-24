@@ -384,8 +384,22 @@ body {
     100% { transform: translate(1px, 1px); }
 }
 
-/* ── Glitch Text Effect ────────────────────────────────────── */
-.glitch-text {
+/* ── App Title (neutral base) ──────────────────────────────── */
+.app-title {
+    font-family: var(--t-font-heading);
+    font-weight: 800;
+    color: var(--t-accent, var(--nc-red));
+    font-size: 1.5rem;
+    letter-spacing: -0.01em;
+    line-height: 1.2;
+}
+
+.app-title.small {
+    font-size: 1.1rem;
+}
+
+/* ── Cyberpunk: app-title becomes glitch text ─────────────── */
+[data-theme="cyberpunk"] .app-title {
     position: relative;
     font-family: 'Orbitron', sans-serif;
     font-weight: 900;
@@ -394,8 +408,8 @@ body {
     animation: glitch-pulse 4s ease-in-out infinite;
 }
 
-.glitch-text::before,
-.glitch-text::after {
+[data-theme="cyberpunk"] .app-title::before,
+[data-theme="cyberpunk"] .app-title::after {
     content: attr(data-text);
     position: absolute;
     top: 0; left: 0;
@@ -403,18 +417,24 @@ body {
     height: 100%;
 }
 
-.glitch-text::before {
+[data-theme="cyberpunk"] .app-title::before {
     color: var(--nc-cyan);
     animation: glitch-before 4s ease-in-out infinite;
     clip-path: polygon(0 0, 100% 0, 100% 45%, 0 45%);
 }
 
-.glitch-text::after {
+[data-theme="cyberpunk"] .app-title::after {
     color: var(--nc-yellow);
     animation: glitch-after 4s ease-in-out infinite;
     clip-path: polygon(0 55%, 100% 55%, 100% 100%, 0 100%);
 }
 
+[data-theme="cyberpunk"] .app-title.small {
+    font-size: 1.2rem;
+    animation-duration: 6s;
+}
+
+/* ── Glitch Text keyframes (used by cyberpunk only) ────────── */
 @keyframes glitch-pulse {
     0%, 90%, 100% { text-shadow: var(--nc-glow-red); }
     91%  { text-shadow: none; }
@@ -439,11 +459,6 @@ body {
     93% { transform: translate(0); opacity: 0; }
     96% { transform: translate(2px, 0); opacity: 0.5; }
     97% { transform: translate(0); opacity: 0; }
-}
-
-.glitch-text.small {
-    font-size: 1.2rem;
-    animation-duration: 6s;
 }
 
 /* ── Blinking Cursor ───────────────────────────────────────── */
@@ -493,8 +508,11 @@ body {
     font-size: 0.75rem;
     cursor: pointer;
     padding: 0;
-    text-shadow: var(--nc-glow-cyan);
     transition: opacity 0.15s;
+}
+
+[data-theme="cyberpunk"] .breadcrumb-link {
+    text-shadow: var(--nc-glow-cyan);
 }
 
 .breadcrumb-link:hover {
@@ -531,8 +549,15 @@ body {
 }
 
 .section-label {
-    font-size: 0.8rem;
-    color: var(--t-label-color, var(--nc-red));
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--nc-text);
+    font-family: var(--t-font-heading);
+    letter-spacing: 0.02em;
+}
+
+[data-theme="cyberpunk"] .section-label {
+    color: var(--nc-red);
     letter-spacing: 0.15em;
     text-shadow: var(--nc-glow-red);
 }
@@ -563,10 +588,13 @@ body {
 
 .folder-icon {
     color: var(--t-accent2, var(--nc-cyan));
-    text-shadow: var(--nc-glow-cyan);
     font-size: 0.9rem;
     flex-shrink: 0;
     transition: transform 0.15s;
+}
+
+[data-theme="cyberpunk"] .folder-icon {
+    text-shadow: var(--nc-glow-cyan);
 }
 
 .folder-card:hover .folder-icon {
@@ -633,9 +661,12 @@ body {
 
 .file-icon {
     color: var(--t-accent3, var(--nc-yellow));
-    text-shadow: var(--nc-glow-yellow);
     font-size: 0.85rem;
     flex-shrink: 0;
+}
+
+[data-theme="cyberpunk"] .file-icon {
+    text-shadow: var(--nc-glow-yellow);
 }
 
 .file-info {
@@ -678,15 +709,16 @@ body {
     font-size: 0.8rem;
     padding: 0.2rem 0.45rem;
     cursor: pointer;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--t-font-ui);
     transition: color 0.15s, border-color 0.15s, background 0.15s;
     line-height: 1;
+    border-radius: 2px;
 }
 
 .icon-btn:hover {
-    color: var(--nc-red);
+    color: var(--t-accent, var(--nc-red));
     border-color: var(--nc-red-dim);
-    background: rgba(255, 0, 60, 0.1);
+    background: rgba(128, 128, 128, 0.1);
 }
 
 /* ── Drag-over state for file list ───────────────────────────── */
@@ -761,6 +793,9 @@ body {
 .mode-btn.active {
     color: var(--t-mode-btn-active-color, var(--nc-bg-void));
     background: var(--t-mode-btn-active-bg, var(--nc-red));
+}
+
+[data-theme="cyberpunk"] .mode-btn.active {
     box-shadow: var(--nc-glow-red);
 }
 
@@ -830,7 +865,7 @@ body {
     cursor: text;
 }
 .editor-zone[data-mode="preview"] .preview-pane::after {
-    content: '// click to edit';
+    content: 'Click to edit';
     display: block;
     text-align: center;
     color: var(--nc-text-dim);
@@ -847,12 +882,18 @@ body {
 }
 
 .save-status.unsaved {
-    color: var(--nc-yellow);
-    text-shadow: var(--nc-glow-yellow);
+    color: var(--t-accent3, var(--nc-yellow));
 }
 
 .save-status.saved {
-    color: var(--nc-cyan);
+    color: var(--t-accent2, var(--nc-cyan));
+}
+
+[data-theme="cyberpunk"] .save-status.unsaved {
+    text-shadow: var(--nc-glow-yellow);
+}
+
+[data-theme="cyberpunk"] .save-status.saved {
     text-shadow: var(--nc-glow-cyan);
 }
 
@@ -1036,8 +1077,8 @@ body {
     margin-bottom: 3rem;
 }
 
-.auth-logo .glitch-text {
-    font-size: clamp(2rem, 8vw, 4rem);
+.auth-logo .app-title {
+    font-size: clamp(2rem, 8vw, 3.5rem);
     display: block;
     margin-bottom: 0.75rem;
 }
@@ -1045,7 +1086,8 @@ body {
 .auth-subtitle {
     color: var(--nc-text-dim);
     font-size: 0.85rem;
-    letter-spacing: 0.2em;
+    letter-spacing: 0.04em;
+    font-family: var(--t-font-ui);
 }
 
 .auth-tabs {
@@ -1063,23 +1105,22 @@ body {
     background: transparent;
     border: none;
     color: var(--nc-text-dim);
-    font-family: 'Orbitron', sans-serif;
+    font-family: var(--t-font-heading);
     font-size: 0.75rem;
     font-weight: 700;
-    letter-spacing: 0.15em;
+    letter-spacing: 0.08em;
     cursor: pointer;
     transition: all 0.2s;
 }
 
 .auth-tab.active {
-    background: var(--nc-red);
-    color: var(--nc-bg-void);
-    box-shadow: var(--nc-glow-red);
+    background: var(--t-accent, var(--nc-red));
+    color: var(--t-mode-btn-active-color, var(--nc-bg-void));
 }
 
 .auth-tab:not(.active):hover {
-    color: var(--nc-red);
-    background: rgba(255, 0, 60, 0.1);
+    color: var(--t-accent, var(--nc-red));
+    background: rgba(128, 128, 128, 0.08);
 }
 
 .auth-form {
@@ -1097,7 +1138,15 @@ body {
 }
 
 .field-label {
-    font-size: 0.75rem;
+    font-size: 0.78rem;
+    color: var(--t-label-color, var(--nc-text-dim));
+    letter-spacing: 0.04em;
+    font-family: var(--t-font-ui);
+    font-weight: 500;
+}
+
+/* Cyberpunk: field labels get neon color */
+[data-theme="cyberpunk"] .field-label {
     color: var(--nc-cyan);
     letter-spacing: 0.15em;
     text-shadow: var(--nc-glow-cyan);
@@ -1216,12 +1265,11 @@ body {
 .link-btn {
     background: none;
     border: none;
-    color: var(--nc-cyan);
-    font-family: 'Share Tech Mono', monospace;
+    color: var(--t-accent2, var(--nc-cyan));
+    font-family: var(--t-font-ui);
     font-size: 0.8rem;
     cursor: pointer;
     padding: 0;
-    text-shadow: var(--nc-glow-cyan);
     text-decoration: underline;
     transition: opacity 0.15s;
 }
@@ -1232,12 +1280,12 @@ body {
 
 /* ── Auth Error ──────────────────────────────────────────────── */
 .auth-error {
-    color: var(--nc-red);
+    color: var(--t-accent, var(--nc-red));
     font-size: 0.85rem;
     padding: 0.65rem 0.75rem;
     border: 1px solid var(--nc-red-dim);
-    background: rgba(255, 0, 60, 0.07);
-    text-shadow: 0 0 8px var(--nc-red);
+    background: rgba(128, 128, 128, 0.05);
+    border-radius: 4px;
 }
 
 .hidden {
@@ -1394,7 +1442,7 @@ body {
     flex-shrink: 0;
 }
 
-/* Disable cyberpunk-specific animations on non-cyberpunk themes */
+/* ── Hide cyberpunk effects on non-cyberpunk themes ──────────── */
 [data-theme="white"] .scanlines,
 [data-theme="black"] .scanlines,
 [data-theme="typewriter"] .scanlines { display: none; }
@@ -1403,24 +1451,34 @@ body {
 [data-theme="black"] .noise-overlay,
 [data-theme="typewriter"] .noise-overlay { display: none; }
 
-[data-theme="white"] .glitch-text,
-[data-theme="black"] .glitch-text,
-[data-theme="typewriter"] .glitch-text {
-    animation: none;
-    text-shadow: none;
-    color: var(--t-accent);
-}
-
-[data-theme="white"] .glitch-text::before,
-[data-theme="white"] .glitch-text::after,
-[data-theme="black"] .glitch-text::before,
-[data-theme="black"] .glitch-text::after,
-[data-theme="typewriter"] .glitch-text::before,
-[data-theme="typewriter"] .glitch-text::after { display: none; }
-
+/* Non-cyberpunk: no glow/animation on buttons */
 [data-theme="white"] .cyber-btn:hover,
 [data-theme="black"] .cyber-btn:hover,
 [data-theme="typewriter"] .cyber-btn:hover { animation: none; box-shadow: none; }
+
+/* Non-cyberpunk: hide .btn-glow overlay (the neon fill) */
+[data-theme="white"] .btn-glow,
+[data-theme="black"] .btn-glow,
+[data-theme="typewriter"] .btn-glow { display: none; }
+
+/* Non-cyberpunk: clean button clip-path */
+[data-theme="white"] .cyber-btn,
+[data-theme="black"] .cyber-btn,
+[data-theme="typewriter"] .cyber-btn {
+    clip-path: none;
+    border-radius: 4px;
+}
+
+/* Non-cyberpunk: clean input/textarea clip-path */
+[data-theme="white"] .cyber-input,
+[data-theme="black"] .cyber-input,
+[data-theme="typewriter"] .cyber-input,
+[data-theme="white"] .cyber-textarea,
+[data-theme="black"] .cyber-textarea,
+[data-theme="typewriter"] .cyber-textarea {
+    clip-path: none;
+    border-radius: 4px;
+}
 
 .user-badge {
     font-size: 0.78rem;
@@ -1738,6 +1796,20 @@ body {
     text-align: center;
     padding: 4rem 2rem;
     border: 1px dashed var(--nc-text-dim);
+    border-radius: 4px;
+}
+
+.empty-headline {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--nc-text);
+    font-family: var(--t-font-heading);
+    display: block;
+    margin-bottom: 0.5rem;
+}
+
+.empty-headline.loading-text {
+    color: var(--t-accent2, var(--nc-text-dim));
 }
 
 .empty-state .blink {
@@ -1748,7 +1820,7 @@ body {
 
 .empty-sub {
     color: var(--nc-text-dim);
-    font-size: 0.8rem;
+    font-size: 0.85rem;
 }
 
 .loading-state {
@@ -1808,7 +1880,7 @@ body {
         display: none;
     }
 
-    .glitch-text.small {
+    .app-title.small {
         font-size: 0.9rem;
     }
 
