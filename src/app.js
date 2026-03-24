@@ -71,7 +71,7 @@ export class ThoughtCollector {
         this._escHandler = async (e) => {
             if (e.key === 'Escape') {
                 if (this._saving) {
-                    this._toast('> PLEASE WAIT — SAVE IN PROGRESS...')
+                    this._toast('Please wait — save in progress...')
                     return
                 }
                 if (this.view === 'editor') {
@@ -206,7 +206,7 @@ export class ThoughtCollector {
         const sidebarEl = sidebar ? `
             <nav class="app-sidebar" id="app-sidebar">
                 <div class="sidebar-header">
-                    <span class="sidebar-title">FOLDERS</span>
+                    <span class="sidebar-title">Folders</span>
                     <button class="sidebar-new-btn" id="sidebar-new-folder" title="New folder">+</button>
                 </div>
                 <div class="sidebar-list">${sidebarHtml || '<p class="sidebar-empty">No folders yet</p>'}</div>
@@ -218,7 +218,7 @@ export class ThoughtCollector {
                 <header class="app-header">
                     <div class="header-left">
                         <button class="app-logo-btn" id="go-home" title="Home">
-                            <h1 class="glitch-text small" data-text="THOUGHTS.EXE">THOUGHTS.EXE</h1>
+                            <h1 class="app-title small" data-text="Thoughts">Thoughts</h1>
                         </button>
                         <nav class="breadcrumb" id="breadcrumb">${this._buildBreadcrumb()}</nav>
                     </div>
@@ -335,8 +335,8 @@ export class ThoughtCollector {
         return ''
     }
 
-    _loading(message = 'LOADING...') {
-        return `<div class="empty-state"><p class="blink">> ${message}_</p></div>`
+    _loading(message = 'Loading...') {
+        return `<div class="empty-state"><p class="empty-headline loading-text">${message}</p></div>`
     }
 
     _bindShell() {
@@ -349,7 +349,7 @@ export class ThoughtCollector {
 
         // Home logo
         this.container.querySelector('#go-home').addEventListener('click', async () => {
-            if (this._saving) { this._toast('> PLEASE WAIT — SAVE IN PROGRESS...'); return }
+            if (this._saving) { this._toast('Please wait — save in progress...'); return }
             if (this.editorDirty) {
                 const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                 if (!ok) return
@@ -361,7 +361,7 @@ export class ThoughtCollector {
         // Breadcrumb folder links
         this.container.querySelectorAll('.breadcrumb-link[data-folder-id]').forEach(btn => {
             btn.addEventListener('click', async () => {
-                if (this._saving) { this._toast('> PLEASE WAIT — SAVE IN PROGRESS...'); return }
+                if (this._saving) { this._toast('Please wait — save in progress...'); return }
                 if (this.editorDirty) {
                     const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                     if (!ok) return
@@ -414,7 +414,7 @@ export class ThoughtCollector {
                     this._toggleSidebarFolder(folderId)
                     return
                 }
-                if (this._saving) { this._toast('> PLEASE WAIT — SAVE IN PROGRESS...'); return }
+                if (this._saving) { this._toast('Please wait — save in progress...'); return }
                 if (this.editorDirty) {
                     const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                     if (!ok) return
@@ -437,7 +437,7 @@ export class ThoughtCollector {
         this.container.querySelectorAll('.sidebar-file-dot').forEach(btn => {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation()
-                if (this._saving) { this._toast('> PLEASE WAIT — SAVE IN PROGRESS...'); return }
+                if (this._saving) { this._toast('Please wait — save in progress...'); return }
                 if (this.editorDirty) {
                     const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
                     if (!ok) return
@@ -498,7 +498,7 @@ export class ThoughtCollector {
                         this.currentFolder = foldersAPI.list().find(f => f.id === sourceFolderId)
                         this._render()
                     } catch (err) {
-                        this._toast(`> MOVE ERROR: ${err.message}`)
+                        this._toast(`Move error: ${err.message}`)
                     }
                     return
                 }
@@ -510,7 +510,7 @@ export class ThoughtCollector {
                         await foldersAPI.move(folderId, targetFolderId)
                         this._render()
                     } catch (err) {
-                        this._toast(`> MOVE ERROR: ${err.message}`)
+                        this._toast(`Move error: ${err.message}`)
                     }
                 }
             })
@@ -601,21 +601,21 @@ export class ThoughtCollector {
                 </div>
             `).join('')
             : `<div class="empty-state">
-                <p class="blink">> NO FOLDERS FOUND_</p>
-                <p class="empty-sub">// CREATE A FOLDER TO BEGIN</p>
+                <p class="empty-headline">No folders yet</p>
+                <p class="empty-sub">Create a folder to get started</p>
                </div>`
 
         const body = `
             <div class="toolbar">
-                <span class="section-label">// FOLDERS</span>
+                <span class="section-label">Folders</span>
                 <div class="toolbar-actions">
                     <button class="cyber-btn compact-btn" id="upload-root-folder-btn" title="Upload folder(s) of .md files to root">
-                        <span class="btn-text">↑ UPLOAD FOLDER</span>
+                        <span class="btn-text">Upload folder</span>
                         <span class="btn-glow"></span>
                     </button>
                     <input type="file" id="root-folder-file-input" webkitdirectory multiple style="display:none">
                     <button class="cyber-btn compact-btn" id="new-folder-btn">
-                        <span class="btn-text">+ NEW FOLDER</span>
+                        <span class="btn-text">+ New folder</span>
                         <span class="btn-glow"></span>
                     </button>
                 </div>
@@ -677,7 +677,7 @@ export class ThoughtCollector {
             await foldersAPI.create(name, parentId)
             this._render()
         } catch (err) {
-            this._toast(`> ERROR: ${err.message}`)
+            this._toast(`Error: ${err.message}`)
         }
     }
 
@@ -690,7 +690,7 @@ export class ThoughtCollector {
             foldersAPI.rename(id, name)
             this._render()
         } catch (err) {
-            this._toast(`> ERROR: ${err.message}`)
+            this._toast(`Error: ${err.message}`)
         }
     }
 
@@ -705,7 +705,7 @@ export class ThoughtCollector {
             this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
             this._render()
         } catch (err) {
-            this._toast(`> ERROR: ${err.message}`)
+            this._toast(`Error: ${err.message}`)
         }
     }
 
@@ -734,12 +734,12 @@ export class ThoughtCollector {
                 })
                 .catch(err => {
                     this._hideProgressToast()
-                    this._toast(`> DELETE ERROR: ${err.message}`)
+                    this._toast(`Delete error: ${err.message}`)
                 })
         } else {
             foldersAPI.delete(id)
                 .then(() => { this._render() })
-                .catch(err => this._toast(`> DELETE ERROR: ${err.message}`))
+                .catch(err => this._toast(`Delete error: ${err.message}`))
         }
     }
 
@@ -788,7 +788,7 @@ export class ThoughtCollector {
                 <div class="file-icon">#</div>
                 <div class="file-info">
                     <span class="file-title">${this._esc(f.title)}</span>
-                    <span class="file-meta">// ${this._relTime(f.updated_at)}</span>
+                    <span class="file-meta">${this._relTime(f.updated_at)}</span>
                 </div>
                 <div class="file-actions">
                     <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="file" title="Move">mv</button>
@@ -801,31 +801,31 @@ export class ThoughtCollector {
         const isEmpty = !subfolders.length && !files.length
         const contentHtml = isEmpty
             ? `<div class="empty-state">
-                <p class="blink">> EMPTY FOLDER_</p>
-                <p class="empty-sub">// CREATE A FILE OR SUBFOLDER TO BEGIN</p>
+                <p class="empty-headline">Empty folder</p>
+                <p class="empty-sub">Create a file or subfolder to get started</p>
                </div>`
             : (subfolderCards + fileCards)
 
         const body = `
             <div class="toolbar">
-                <span class="section-label">// ${this._esc(folder.name).toUpperCase()}</span>
+                <span class="section-label">${this._esc(folder.name)}</span>
                 <div class="toolbar-actions">
                     <button class="cyber-btn compact-btn" id="upload-folder-btn" title="Upload folder of .md files">
-                        <span class="btn-text">↑ UPLOAD FOLDER</span>
+                        <span class="btn-text">Upload folder</span>
                         <span class="btn-glow"></span>
                     </button>
                     <input type="file" id="folder-file-input" webkitdirectory multiple style="display:none">
                     <button class="cyber-btn compact-btn" id="upload-md-btn" title="Upload .md files">
-                        <span class="btn-text">↑ UPLOAD .MD</span>
+                        <span class="btn-text">Upload .md</span>
                         <span class="btn-glow"></span>
                     </button>
                     <input type="file" id="md-file-input" accept=".md,text/markdown" multiple style="display:none">
                     <button class="cyber-btn compact-btn" id="new-subfolder-btn">
-                        <span class="btn-text">+ SUBFOLDER</span>
+                        <span class="btn-text">+ Subfolder</span>
                         <span class="btn-glow"></span>
                     </button>
                     <button class="cyber-btn compact-btn" id="new-file-btn">
-                        <span class="btn-text">+ NEW FILE</span>
+                        <span class="btn-text">+ New file</span>
                         <span class="btn-glow"></span>
                     </button>
                 </div>
@@ -959,7 +959,7 @@ export class ThoughtCollector {
                     this.currentFolder = foldersAPI.list().find(f => f.id === folder.id)
                     this._render()
                 } catch (err) {
-                    this._toast(`> MOVE ERROR: ${err.message}`)
+                    this._toast(`Move error: ${err.message}`)
                 }
             })
         })
@@ -983,14 +983,14 @@ export class ThoughtCollector {
                 succeeded++
                 this._updateProgressToast('Uploading', i + 1, total)
             } catch (err) {
-                this._toast(`> UPLOAD ERROR: ${f.name}: ${err.message}`)
+                this._toast(`Upload error: ${f.name}: ${err.message}`)
                 this._updateProgressToast('Uploading', i + 1, total)
             }
         }
 
         this._hideProgressToast()
         if (succeeded) {
-            this._toast(`> UPLOADED ${succeeded} FILE${succeeded > 1 ? 'S' : ''}`)
+            this._toast(`Uploaded ${succeeded} file${succeeded > 1 ? 's' : ''}`)
             this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
             this._render()
         }
@@ -1002,7 +1002,7 @@ export class ThoughtCollector {
         const allFiles = Array.from(input.files || [])
         const mdFiles = allFiles.filter(f => f.name.endsWith('.md'))
         if (!mdFiles.length) {
-            this._toast('> NO .MD FILES FOUND IN FOLDER')
+            this._toast('No .md files found in folder')
             if (input.value !== undefined) input.value = ''
             return
         }
@@ -1040,14 +1040,14 @@ export class ThoughtCollector {
                 this._updateProgressToast('Uploading', i + 1, total)
             } catch (err) {
                 errors++
-                this._toast(`> ERROR: ${f.name}: ${err.message}`)
+                this._toast(`Error: ${f.name}: ${err.message}`)
                 this._updateProgressToast('Uploading', i + 1, total)
             }
         }
 
         this._hideProgressToast()
         if (succeeded) {
-            this._toast(`> UPLOADED ${succeeded} FILE${succeeded > 1 ? 'S' : ''}${errors ? `, ${errors} FAILED` : ''}`)
+            this._toast(`Uploaded ${succeeded} file${succeeded > 1 ? 's' : ''}${errors ? `, ${errors} failed` : ''}`)
             this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
             this._render()
         }
@@ -1059,7 +1059,7 @@ export class ThoughtCollector {
         const allFiles = Array.from(input.files || [])
         const mdFiles = allFiles.filter(f => f.name.endsWith('.md'))
         if (!mdFiles.length) {
-            this._toast('> NO .MD FILES FOUND IN SELECTED FOLDER(S)')
+            this._toast('No .md files found in selected folder(s)')
             if (input.value !== undefined) input.value = ''
             return
         }
@@ -1113,17 +1113,17 @@ export class ThoughtCollector {
                 this._updateProgressToast('Uploading', i + 1, total)
             } catch (err) {
                 errors++
-                this._toast(`> ERROR: ${f.name}: ${err.message}`)
+                this._toast(`Error: ${f.name}: ${err.message}`)
                 this._updateProgressToast('Uploading', i + 1, total)
             }
         }
 
         this._hideProgressToast()
         if (succeeded) {
-            this._toast(`> UPLOADED ${succeeded} FILE${succeeded > 1 ? 'S' : ''}${errors ? `, ${errors} FAILED` : ''}`)
+            this._toast(`Uploaded ${succeeded} file${succeeded > 1 ? 's' : ''}${errors ? `, ${errors} failed` : ''}`)
             this._render()
         } else if (errors) {
-            this._toast(`> UPLOAD FAILED: ${errors} ERROR${errors > 1 ? 'S' : ''}`)
+            this._toast(`Upload failed: ${errors} error${errors > 1 ? 's' : ''}`)
         }
         if (input.value !== undefined) input.value = ''
     }
@@ -1145,7 +1145,7 @@ export class ThoughtCollector {
             await foldersAPI.move(folderId, target)
             this._render()
         } catch (err) {
-            this._toast(`> MOVE ERROR: ${err.message}`)
+            this._toast(`Move error: ${err.message}`)
         }
     }
 
@@ -1168,7 +1168,7 @@ export class ThoughtCollector {
             this.currentFolder = foldersAPI.list().find(f => f.id === sourceFolderId)
             this._render()
         } catch (err) {
-            this._toast(`> MOVE ERROR: ${err.message}`)
+            this._toast(`Move error: ${err.message}`)
         }
     }
 
@@ -1294,7 +1294,7 @@ export class ThoughtCollector {
                         this.currentFolder = foldersAPI.list().find(f => f.id === sourceFolderId)
                         this._render()
                     } catch (err) {
-                        this._toast(`> MOVE ERROR: ${err.message}`)
+                        this._toast(`Move error: ${err.message}`)
                     }
                     return
                 }
@@ -1305,7 +1305,7 @@ export class ThoughtCollector {
                     await foldersAPI.move(draggingId, targetId)
                     this._render()
                 } catch (err) {
-                    this._toast(`> MOVE ERROR: ${err.message}`)
+                    this._toast(`Move error: ${err.message}`)
                 }
             })
         })
@@ -1333,7 +1333,7 @@ export class ThoughtCollector {
         if (!title) return
         filesAPI.create(this.currentFolder.id, title)
             .then(file => this._openFile(file))
-            .catch(err => this._toast(`> ERROR: ${err.message}`))
+            .catch(err => this._toast(`Error: ${err.message}`))
     }
 
     async _deleteFile(fileId) {
@@ -1346,7 +1346,7 @@ export class ThoughtCollector {
                 this.currentFolder = foldersAPI.list().find((f) => f.id === this.currentFolder.id)
                 if (this.view === 'files') this._render()
             })
-            .catch(err => this._toast(`> DELETE ERROR: ${err.message}`))
+            .catch(err => this._toast(`Delete error: ${err.message}`))
     }
 
     // ── Open file ─────────────────────────────────────────────
@@ -1356,7 +1356,7 @@ export class ThoughtCollector {
         this.editorDirty = false
         pushHash(this.currentFolder.path, file.id)
 
-        this.container.innerHTML = this._shell(this._loading('LOADING FILE'))
+        this.container.innerHTML = this._shell(this._loading('Loading file...'))
         this._bindShell()
 
         filesAPI.loadContent(this.currentFolder.id, file.id)
@@ -1364,7 +1364,7 @@ export class ThoughtCollector {
                 this.currentFile = loaded
                 if (this.view === 'editor') this._renderEditor()
             })
-            .catch(err => this._toast(`> LOAD ERROR: ${err.message}`))
+            .catch(err => this._toast(`Load error: ${err.message}`))
     }
 
     // ── Editor view ───────────────────────────────────────────
@@ -1377,10 +1377,10 @@ export class ThoughtCollector {
         const modeButtons = `
             <div class="mode-toggle" id="mode-toggle">
                 ${!this._isMobile() ? `
-                <button class="mode-btn ${mode === 'split' ? 'active' : ''}" data-mode="split" title="Split view">[ | ]</button>
+                <button class="mode-btn ${mode === 'split' ? 'active' : ''}" data-mode="split" title="Split view">Split</button>
                 ` : ''}
-                <button class="mode-btn ${mode === 'edit' ? 'active' : ''}" data-mode="edit" title="Edit only">[&nbsp;e&nbsp;]</button>
-                <button class="mode-btn ${mode === 'preview' ? 'active' : ''}" data-mode="preview" title="Preview only">[&nbsp;p&nbsp;]</button>
+                <button class="mode-btn ${mode === 'edit' ? 'active' : ''}" data-mode="edit" title="Edit only">Edit</button>
+                <button class="mode-btn ${mode === 'preview' ? 'active' : ''}" data-mode="preview" title="Preview only">Preview</button>
             </div>
         `
 
@@ -1406,7 +1406,7 @@ export class ThoughtCollector {
                         </button>
                         <span class="save-status" id="save-status"></span>
                         <button class="cyber-btn compact-btn" id="save-btn">
-                            <span class="btn-text">SAVE</span>
+                            <span class="btn-text">Save</span>
                             <span class="btn-glow"></span>
                         </button>
                     </div>
@@ -1416,7 +1416,7 @@ export class ThoughtCollector {
                         <textarea
                             id="file-content"
                             class="cyber-textarea editor-textarea"
-                            placeholder="> write your thoughts here_"
+                            placeholder="Start writing..."
                         ></textarea>
                     </div>
                     <div class="editor-divider"></div>
@@ -1480,7 +1480,7 @@ export class ThoughtCollector {
 
         const markDirty = () => {
             this.editorDirty = true
-            saveStatus.textContent = '// unsaved'
+            saveStatus.textContent = 'unsaved'
             saveStatus.className = 'save-status unsaved'
         }
 
@@ -1512,8 +1512,8 @@ export class ThoughtCollector {
             if (this._saving) return  // prevent concurrent saves
             this._saving = true
             saveBtn.disabled = true
-            saveBtn.querySelector('.btn-text').textContent = 'SAVING...'
-            saveStatus.textContent = '// saving...'
+            saveBtn.querySelector('.btn-text').textContent = 'Saving...'
+            saveStatus.textContent = 'saving...'
             saveStatus.className = 'save-status unsaved'
 
             // Show saving overlay to prevent accidental navigation
@@ -1526,15 +1526,15 @@ export class ThoughtCollector {
                 .then(updated => {
                     this.currentFile = updated
                     this.editorDirty = false
-                    saveStatus.textContent = '// saved'
+                    saveStatus.textContent = 'saved'
                     saveStatus.className = 'save-status saved'
                     setTimeout(() => { if (!this.editorDirty) saveStatus.textContent = '' }, 2000)
                 })
-                .catch(err => this._toast(`> SAVE ERROR: ${err.message}`))
+                .catch(err => this._toast(`Save error: ${err.message}`))
                 .finally(() => {
                     this._saving = false
                     saveBtn.disabled = false
-                    saveBtn.querySelector('.btn-text').textContent = 'SAVE'
+                    saveBtn.querySelector('.btn-text').textContent = 'Save'
                     this._hideSavingOverlay()
                 })
         }
@@ -1998,7 +1998,7 @@ export class ThoughtCollector {
         el.className = 'saving-overlay'
         el.innerHTML = `
             <div class="saving-overlay-box">
-                <span class="saving-label">> SAVING...</span>
+                <span class="saving-label">Saving...</span>
             </div>
         `
         // Prevent clicks from passing through

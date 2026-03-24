@@ -12,25 +12,25 @@ export class AuthController {
         this.container.innerHTML = `
             <div class="auth-panel">
                 <div class="auth-logo">
-                    <h1 class="glitch-text" data-text="THOUGHTS.EXE">THOUGHTS.EXE</h1>
-                    <p class="auth-subtitle">// NIGHT CITY NEURAL INTERFACE //</p>
+                    <h1 class="app-title" data-text="Thoughts">Thoughts</h1>
+                    <p class="auth-subtitle">Your personal writing space</p>
                 </div>
 
                 <form class="auth-form" id="auth-form">
                     <div class="field-group">
-                        <label class="field-label">// NEURAL ID (EMAIL)</label>
+                        <label class="field-label">Email</label>
                         <input
                             type="email"
                             id="auth-email"
                             class="cyber-input"
-                            placeholder="user@nightcity.net"
+                            placeholder="you@example.com"
                             autocomplete="email"
                             required
                         />
                     </div>
 
                     <div class="field-group">
-                        <label class="field-label">// ACCESS CODE</label>
+                        <label class="field-label">Password</label>
                         <input
                             type="password"
                             id="auth-password"
@@ -44,7 +44,7 @@ export class AuthController {
                     <div id="auth-error" class="auth-error hidden"></div>
 
                     <button type="submit" class="cyber-btn primary-btn" id="auth-submit">
-                        <span class="btn-text">JACK IN</span>
+                        <span class="btn-text">Sign in</span>
                         <span class="btn-glow"></span>
                     </button>
 
@@ -72,7 +72,7 @@ export class AuthController {
             this._mode = this._mode === 'login' ? 'signup' : 'login'
             const isSignup = this._mode === 'signup'
             this.container.querySelector('#auth-submit').querySelector('.btn-text').textContent =
-                isSignup ? 'CREATE ACCOUNT' : 'JACK IN'
+                isSignup ? 'Create account' : 'Sign in'
             this.container.querySelector('#toggle-label').textContent =
                 isSignup ? 'Have an account?' : 'New user?'
             this.container.querySelector('#toggle-mode').textContent =
@@ -88,7 +88,7 @@ export class AuthController {
         const errorEl   = this.container.querySelector('#auth-error')
 
         submitBtn.disabled = true
-        submitBtn.querySelector('.btn-text').textContent = 'CONNECTING...'
+        submitBtn.querySelector('.btn-text').textContent = 'Connecting...'
         errorEl.classList.add('hidden')
         errorEl.textContent = ''
 
@@ -103,12 +103,12 @@ export class AuthController {
             const msg = err.message || 'Unknown error'
             const isConflict = err.status === 409 || msg.toLowerCase().includes('already exists')
             errorEl.innerHTML = isConflict
-                ? `> EMAIL ALREADY REGISTERED — <button type="button" class="link-btn" id="err-switch-login">SIGN IN INSTEAD</button>`
-                : `> ERROR: ${msg.toUpperCase()}`
+                ? `Email already registered — <button type="button" class="link-btn" id="err-switch-login">Sign in instead</button>`
+                : msg
             errorEl.classList.remove('hidden')
             submitBtn.disabled = false
             submitBtn.querySelector('.btn-text').textContent =
-                this._mode === 'signup' ? 'CREATE ACCOUNT' : 'JACK IN'
+                this._mode === 'signup' ? 'Create account' : 'Sign in'
             this.container.querySelector('#auth-password').value = ''
             this.container.querySelector('#auth-password').focus()
 
