@@ -1663,7 +1663,7 @@ body {
 }
 
 .editor-preview h1 { font-size: 1.5rem; }
-.editor-preview h2 { font-size: 1.25rem; border-bottom: 1px solid var(--t-preview-hr, var(--nc-red-dim)); padding-bottom: 0.4rem; }
+.editor-preview h2 { font-size: 1.25rem; }
 .editor-preview h3 { font-size: 1.05rem; }
 
 .editor-preview p {
@@ -2324,7 +2324,7 @@ body {
 }
 
 .sidebar-folder:hover {
-    background: rgba(0,0,0,0.06);
+    background: rgba(255,255,255,0.05);
 }
 
 .sidebar-folder.sidebar-drop-target {
@@ -2335,8 +2335,10 @@ body {
 }
 
 .sidebar-folder.active {
-    background: var(--t-mode-btn-active-bg, var(--nc-red));
-    color: var(--t-mode-btn-active-color, var(--nc-bg-void));
+    background: rgba(255,255,255,0.08);
+    color: var(--t-accent, var(--nc-red));
+    border-left: 3px solid var(--t-accent, var(--nc-red));
+    padding-left: calc(1rem - 3px);
 }
 
 .sidebar-icon {
@@ -2346,7 +2348,7 @@ body {
 }
 
 .sidebar-folder.active .sidebar-icon {
-    color: inherit;
+    color: var(--t-accent2, var(--nc-cyan));
 }
 
 .sidebar-name {
@@ -2363,8 +2365,7 @@ body {
 }
 
 .sidebar-folder.active .sidebar-count {
-    color: inherit;
-    opacity: 0.7;
+    color: var(--nc-text-dim);
 }
 
 .sidebar-empty {
@@ -2937,7 +2938,7 @@ body {
 }
 
 .sidebar-file-dot:hover {
-    background: rgba(0,0,0,0.05);
+    background: rgba(255,255,255,0.05);
     color: var(--nc-text);
 }
 
@@ -3205,12 +3206,14 @@ body {
 
 /* ── Sidebar file dot: active state when file is open ─────────── */
 .sidebar-file-dot.active {
-    background: var(--t-mode-btn-active-bg, var(--nc-red));
-    color: var(--t-mode-btn-active-color, var(--nc-bg-void));
+    background: rgba(255,255,255,0.08);
+    color: var(--nc-text);
+    border-left: 3px solid var(--t-accent2, var(--nc-cyan));
+    padding-left: calc(0.75rem - 3px);
 }
 
 .sidebar-file-dot.active .sidebar-dot-icon {
-    color: inherit;
+    color: var(--t-accent3, var(--nc-yellow));
 }
 
 /* ── PDF button compact ──────────────────────────────────────── */
