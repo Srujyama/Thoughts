@@ -87,10 +87,20 @@ export class AuthController {
         const submitBtn = this.container.querySelector('#auth-submit')
         const errorEl   = this.container.querySelector('#auth-error')
 
+        if (!email || !password) {
+            errorEl.textContent = 'Please fill in both fields'
+            errorEl.classList.remove('hidden')
+            return
+        }
+
         submitBtn.disabled = true
-        submitBtn.querySelector('.btn-text').textContent = 'Connecting...'
+        const btnText = submitBtn.querySelector('.btn-text')
+        btnText.textContent = 'Connecting...'
+        btnText.classList.add('auth-loading')
         errorEl.classList.add('hidden')
         errorEl.textContent = ''
+
+        const startTime = performance.now()
 
         try {
             if (this._mode === 'login') {
@@ -98,17 +108,24 @@ export class AuthController {
             } else {
                 await auth.signup(email, password)
             }
-            this.onAuthSuccess()
+            // Smooth transition — ensure minimum 300ms so user sees feedback
+            const elapsed = performance.now() - startTime
+            if (elapsed < 300) await new Promise(r => setTimeout(r, 300 - elapsed))
+            btnText.textContent = 'Success!'
+            setTimeout(() => this.onAuthSuccess(), 150)
         } catch (err) {
             const msg = err.message || 'Unknown error'
             const isConflict = err.status === 409 || msg.toLowerCase().includes('already exists')
-            errorEl.innerHTML = isConflict
-                ? `Email already registered — <button type="button" class="link-btn" id="err-switch-login">Sign in instead</button>`
-                : msg
+            if (isConflict) {
+                errorEl.innerHTML = `Email already registered — <button type="button" class="link-btn" id="err-switch-login">Sign in instead</button>`
+            } else {
+                errorEl.textContent = msg
+            }
             errorEl.classList.remove('hidden')
             submitBtn.disabled = false
-            submitBtn.querySelector('.btn-text').textContent =
+            btnText.textContent =
                 this._mode === 'signup' ? 'Create account' : 'Sign in'
+            btnText.classList.remove('auth-loading')
             this.container.querySelector('#auth-password').value = ''
             this.container.querySelector('#auth-password').focus()
 

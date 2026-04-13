@@ -11,7 +11,7 @@ function showAuthView() {
 }
 
 function showAppView() {
-    // Start proactive token refresh cycle
+    // Start proactive token refresh cycle immediately (non-blocking)
     auth.startRefreshCycle()
     new ThoughtCollector(appEl, () => showAuthView())
 }
@@ -22,11 +22,18 @@ setSessionExpiredHandler(() => {
 })
 
 function init() {
+    // Fast auth check — just look for token in localStorage (no network call)
     if (auth.isAuthed()) {
+        // Show app immediately from local cache, token refresh happens async
         showAppView()
     } else {
         showAuthView()
     }
 }
 
-init()
+// Run init as soon as possible
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init)
+} else {
+    init()
+}

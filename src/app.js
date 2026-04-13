@@ -1,10 +1,13 @@
 // src/app.js
-import { foldersAPI, filesAPI, auth } from './api.js'
+import { foldersAPI, filesAPI, auth, vaultAPI } from './api.js'
 
 const EDITOR_MODE_KEY  = 'nc_editor_mode'
 const THEME_KEY        = 'nc_theme'
 const AUTOSAVE_KEY     = 'nc_autosave'
 const SIDEBAR_OPEN_KEY = 'nc_sidebar_open'
+const STARRED_KEY      = 'nc_starred'
+const RECENT_KEY       = 'nc_recent'
+const DAILY_FOLDER     = 'daily-notes'
 
 const THEMES = [
     { id: 'system',     label: 'System' },
@@ -12,6 +15,11 @@ const THEMES = [
     { id: 'black',      label: 'Black' },
     { id: 'cyberpunk',  label: 'Cyberpunk' },
     { id: 'typewriter', label: 'Typewriter' },
+    { id: 'nord',       label: 'Nord' },
+    { id: 'dracula',    label: 'Dracula' },
+    { id: 'solarized',  label: 'Solarized' },
+    { id: 'monokai',    label: 'Monokai' },
+    { id: 'ocean',      label: 'Ocean' },
 ]
 
 // ── System theme media query watcher ──────────────────────────
@@ -60,6 +68,14 @@ export class ThoughtCollector {
         this._autosaveTimer = null
         // Track which sidebar folders are collapsed (set of folder ids)
         this._collapsedFolders = new Set(JSON.parse(localStorage.getItem(SIDEBAR_OPEN_KEY) || '[]'))
+        // Starred (favorited) file ids
+        this._starred = new Set(JSON.parse(localStorage.getItem(STARRED_KEY) || '[]'))
+        // Recent files [{folderId, fileId, title}] (max 10)
+        this._recent = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]')
+        // Outline panel open state
+        this._outlineOpen = false
+        // Backlinks panel open state
+        this._backlinksOpen = false
 
         // Apply saved theme (default: system)
         const savedTheme = localStorage.getItem(THEME_KEY) || 'system'
@@ -67,6 +83,35 @@ export class ThoughtCollector {
 
         this._restoreFromHash()
         window.addEventListener('popstate', () => this._restoreFromHash())
+
+        // Global keyboard shortcuts
+        this._globalKeyHandler = (e) => {
+            // Command palette: Ctrl/Cmd+P
+            if (e.key === 'p' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault()
+                this._showCommandPalette()
+                return
+            }
+            // Quick switcher: Ctrl/Cmd+O
+            if (e.key === 'o' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault()
+                this._showQuickSwitcher()
+                return
+            }
+            // Daily note: Ctrl/Cmd+D (when not in textarea)
+            if (e.key === 'd' && (e.metaKey || e.ctrlKey) && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
+                e.preventDefault()
+                this._openDailyNote()
+                return
+            }
+            // Graph view: Ctrl/Cmd+G (when not in textarea)
+            if (e.key === 'g' && (e.metaKey || e.ctrlKey) && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
+                e.preventDefault()
+                this._showGraphView()
+                return
+            }
+        }
+        document.addEventListener('keydown', this._globalKeyHandler)
 
         this._escHandler = async (e) => {
             if (e.key === 'Escape') {
@@ -96,7 +141,7 @@ export class ThoughtCollector {
     // ── Theme ─────────────────────────────────────────────────
     _applyTheme(themeId) {
         // Migrate old theme IDs to new ones
-        const migrations = { light: 'white', dark: 'black', docs: 'white', nord: 'black', solarized: 'white' }
+        const migrations = { light: 'white', dark: 'black', docs: 'white' }
         if (migrations[themeId]) themeId = migrations[themeId]
 
         const valid = THEMES.find(t => t.id === themeId)
@@ -223,6 +268,9 @@ export class ThoughtCollector {
                         <nav class="breadcrumb" id="breadcrumb">${this._buildBreadcrumb()}</nav>
                     </div>
                     <div class="header-right">
+                        <button class="header-icon-btn" id="daily-note-btn" title="Daily note (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+D)">&#9782;</button>
+                        <button class="header-icon-btn" id="graph-view-btn" title="Graph view (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+G)">&#9672;</button>
+                        <button class="header-icon-btn" id="cmd-palette-btn" title="Command palette (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+P)">&#8984;</button>
                         <div class="theme-picker" id="theme-picker">
                             <button class="theme-toggle-btn" id="theme-toggle-btn" title="Change theme">
                                 <span class="theme-toggle-swatch" data-theme="${currentTheme}"></span>
@@ -263,14 +311,17 @@ export class ThoughtCollector {
 
             // Build file dots (one dot per .md file)
             const fileDots = !isCollapsed && f.files.length > 0
-                ? f.files.map(file => `
-                    <button class="sidebar-file-dot" data-folder-id="${f.id}" data-file-id="${file.id}"
+                ? f.files.map(file => {
+                    const isFileActive = this.currentFile?.id === file.id
+                    const isStarred = this._starred.has(file.id)
+                    return `
+                    <button class="sidebar-file-dot ${isFileActive ? 'active' : ''}" data-folder-id="${f.id}" data-file-id="${file.id}"
                             title="${this._esc(file.title)}"
                             style="padding-left: calc(0.75rem + ${indent + 20}px)">
-                        <span class="sidebar-dot-icon">·</span>
+                        <span class="sidebar-dot-icon">${isStarred ? '&#9733;' : '·'}</span>
                         <span class="sidebar-dot-name">${this._esc(file.title)}</span>
                     </button>
-                `).join('')
+                `}).join('')
                 : ''
 
             const chevron = hasChildren
@@ -343,6 +394,7 @@ export class ThoughtCollector {
         // Logout
         this.container.querySelector('#logout-btn').addEventListener('click', async () => {
             document.removeEventListener('keydown', this._escHandler)
+            document.removeEventListener('keydown', this._globalKeyHandler)
             await auth.logout()
             this.onLogout()
         })
@@ -452,6 +504,14 @@ export class ThoughtCollector {
                 }
             })
         })
+
+        // Header action buttons (daily note, graph view, command palette)
+        const dailyNoteBtn = this.container.querySelector('#daily-note-btn')
+        if (dailyNoteBtn) dailyNoteBtn.addEventListener('click', () => this._openDailyNote())
+        const graphViewBtn = this.container.querySelector('#graph-view-btn')
+        if (graphViewBtn) graphViewBtn.addEventListener('click', () => this._showGraphView())
+        const cmdPaletteBtn = this.container.querySelector('#cmd-palette-btn')
+        if (cmdPaletteBtn) cmdPaletteBtn.addEventListener('click', () => this._showCommandPalette())
 
         // Sidebar new root folder button
         const sidebarNewBtn = this.container.querySelector('#sidebar-new-folder')
@@ -1355,16 +1415,38 @@ export class ThoughtCollector {
         this.view = 'editor'
         this.editorDirty = false
         pushHash(this.currentFolder.path, file.id)
+        // Track in recent files
+        this._addRecent(this.currentFolder.id, file.id, file.title)
 
-        this.container.innerHTML = this._shell(this._loading('Loading file...'))
-        this._bindShell()
+        // If content is already loaded (cached), render editor immediately
+        if (file.contentLoaded && file.content) {
+            this._renderEditor()
+            // Still refresh from cloud in background for freshness
+            filesAPI.loadContent(this.currentFolder.id, file.id)
+                .then(loaded => {
+                    // Only update if content actually changed
+                    if (loaded.content !== this.currentFile.content && this.view === 'editor') {
+                        this.currentFile = loaded
+                        const contentArea = this.container.querySelector('#file-content')
+                        const preview = this.container.querySelector('#editor-preview')
+                        if (contentArea && !this.editorDirty) {
+                            contentArea.value = loaded.content || ''
+                            if (preview) this._renderPreview(preview, contentArea.value)
+                        }
+                    }
+                })
+                .catch(() => {})
+        } else {
+            this.container.innerHTML = this._shell(this._loading('Loading file...'))
+            this._bindShell()
 
-        filesAPI.loadContent(this.currentFolder.id, file.id)
-            .then(loaded => {
-                this.currentFile = loaded
-                if (this.view === 'editor') this._renderEditor()
-            })
-            .catch(err => this._toast(`Load error: ${err.message}`))
+            filesAPI.loadContent(this.currentFolder.id, file.id)
+                .then(loaded => {
+                    this.currentFile = loaded
+                    if (this.view === 'editor') this._renderEditor()
+                })
+                .catch(err => this._toast(`Load error: ${err.message}`))
+        }
     }
 
     // ── Editor view ───────────────────────────────────────────
@@ -1383,6 +1465,11 @@ export class ThoughtCollector {
                 <button class="mode-btn ${mode === 'preview' ? 'active' : ''}" data-mode="preview" title="Preview only">Preview</button>
             </div>
         `
+
+        const contentLen = (file.content || '').length
+        const wordCount = (file.content || '').trim() ? (file.content || '').trim().split(/\s+/).length : 0
+        const lineCount = (file.content || '').split('\n').length
+        const readTime = Math.max(1, Math.ceil(wordCount / 200))
 
         const body = `
             <div class="editor-zone" data-mode="${mode}" id="editor-zone">
@@ -1404,12 +1491,61 @@ export class ThoughtCollector {
                             <span class="btn-text">PDF</span>
                             <span class="btn-glow"></span>
                         </button>
+                        <button class="cyber-btn compact-btn" id="focus-btn" title="Focus mode (distraction-free)">
+                            <span class="btn-text">Focus</span>
+                            <span class="btn-glow"></span>
+                        </button>
+                        <button class="cyber-btn compact-btn" id="star-btn" title="Star this note">
+                            <span class="btn-text">${this._starred.has(file.id) ? '&#9733;' : '&#9734;'}</span>
+                            <span class="btn-glow"></span>
+                        </button>
+                        <button class="cyber-btn compact-btn" id="outline-btn" title="Toggle outline">
+                            <span class="btn-text">Outline</span>
+                            <span class="btn-glow"></span>
+                        </button>
+                        <button class="cyber-btn compact-btn" id="backlinks-btn" title="Toggle backlinks">
+                            <span class="btn-text">Backlinks</span>
+                            <span class="btn-glow"></span>
+                        </button>
+                        <button class="cyber-btn compact-btn" id="shortcuts-btn" title="Keyboard shortcuts">
+                            <span class="btn-text">?</span>
+                            <span class="btn-glow"></span>
+                        </button>
                         <span class="save-status" id="save-status"></span>
                         <button class="cyber-btn compact-btn" id="save-btn">
                             <span class="btn-text">Save</span>
                             <span class="btn-glow"></span>
                         </button>
                     </div>
+                </div>
+                <div class="format-toolbar" id="format-toolbar">
+                    <button class="fmt-btn" data-fmt="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+                    <button class="fmt-btn" data-fmt="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+                    <button class="fmt-btn" data-fmt="strikethrough" title="Strikethrough"><s>S</s></button>
+                    <span class="fmt-sep"></span>
+                    <button class="fmt-btn" data-fmt="h1" title="Heading 1">H1</button>
+                    <button class="fmt-btn" data-fmt="h2" title="Heading 2">H2</button>
+                    <button class="fmt-btn" data-fmt="h3" title="Heading 3">H3</button>
+                    <span class="fmt-sep"></span>
+                    <button class="fmt-btn" data-fmt="code" title="Inline code">&lt;/&gt;</button>
+                    <button class="fmt-btn" data-fmt="codeblock" title="Code block">{ }</button>
+                    <button class="fmt-btn" data-fmt="quote" title="Blockquote">&gt;</button>
+                    <span class="fmt-sep"></span>
+                    <button class="fmt-btn" data-fmt="ul" title="Bullet list">&#8226; List</button>
+                    <button class="fmt-btn" data-fmt="ol" title="Numbered list">1. List</button>
+                    <button class="fmt-btn" data-fmt="task" title="Task list">&#9744; Task</button>
+                    <span class="fmt-sep"></span>
+                    <button class="fmt-btn" data-fmt="link" title="Insert link">Link</button>
+                    <button class="fmt-btn" data-fmt="image" title="Insert image">Img</button>
+                    <button class="fmt-btn" data-fmt="hr" title="Horizontal rule">---</button>
+                    <span class="fmt-sep"></span>
+                    <button class="fmt-btn" data-fmt="table" title="Insert table">Table</button>
+                    <span class="fmt-sep"></span>
+                    <button class="fmt-btn" data-fmt="wikilink" title="Internal link [[...]]">[[]]</button>
+                    <button class="fmt-btn" data-fmt="tag" title="Tag">#tag</button>
+                    <button class="fmt-btn" data-fmt="callout" title="Callout block">Callout</button>
+                    <button class="fmt-btn" data-fmt="highlight" title="Highlight">==</button>
+                    <button class="fmt-btn" data-fmt="footnote" title="Footnote">[^]</button>
                 </div>
                 <div class="editor-body">
                     <div class="editor-pane">
@@ -1425,8 +1561,31 @@ export class ThoughtCollector {
                     </div>
                 </div>
                 <div class="editor-footer">
-                    <span class="char-count" id="char-count">${(file.content || '').length} chars</span>
-                    <span class="editor-hint">ESC to go back</span>
+                    <div class="editor-stats" id="editor-stats">
+                        <span class="char-count" id="char-count">${contentLen} chars</span>
+                        <span class="word-count" id="word-count">${wordCount} words</span>
+                        <span class="line-count" id="line-count">${lineCount} lines</span>
+                        <span class="read-time" id="read-time">${readTime} min read</span>
+                    </div>
+                    <div class="editor-footer-right">
+                        <button class="editor-hint-btn" id="heading-jump-btn" title="Jump to heading">Headings</button>
+                        <span class="editor-hint">ESC to go back</span>
+                    </div>
+                </div>
+            </div>
+            <div class="find-replace-bar hidden" id="find-replace-bar">
+                <div class="find-replace-row">
+                    <input type="text" class="find-input" id="find-input" placeholder="Find..." />
+                    <span class="find-count" id="find-count">0/0</span>
+                    <button class="find-nav-btn" id="find-prev" title="Previous">&uarr;</button>
+                    <button class="find-nav-btn" id="find-next" title="Next">&darr;</button>
+                    <button class="find-nav-btn" id="find-toggle-replace" title="Toggle replace">&#8597;</button>
+                    <button class="find-close-btn" id="find-close">&times;</button>
+                </div>
+                <div class="find-replace-row replace-row hidden" id="replace-row">
+                    <input type="text" class="find-input" id="replace-input" placeholder="Replace..." />
+                    <button class="find-nav-btn" id="replace-one" title="Replace">Replace</button>
+                    <button class="find-nav-btn" id="replace-all" title="Replace all">All</button>
                 </div>
             </div>
         `
@@ -1439,10 +1598,19 @@ export class ThoughtCollector {
         const saveBtn     = this.container.querySelector('#save-btn')
         const saveStatus  = this.container.querySelector('#save-status')
         const charCount   = this.container.querySelector('#char-count')
+        const wordCountEl = this.container.querySelector('#word-count')
+        const lineCountEl = this.container.querySelector('#line-count')
+        const readTimeEl  = this.container.querySelector('#read-time')
         const preview     = this.container.querySelector('#editor-preview')
         const editorZone  = this.container.querySelector('#editor-zone')
         const autosaveChk = this.container.querySelector('#autosave-check')
         const pdfBtn      = this.container.querySelector('#pdf-btn')
+        const focusBtn    = this.container.querySelector('#focus-btn')
+        const shortcutsBtn = this.container.querySelector('#shortcuts-btn')
+        const headingJumpBtn = this.container.querySelector('#heading-jump-btn')
+        const starBtn = this.container.querySelector('#star-btn')
+        const outlineBtn = this.container.querySelector('#outline-btn')
+        const backlinksBtn = this.container.querySelector('#backlinks-btn')
 
         contentArea.value = file.content || ''
         this._renderPreview(preview, contentArea.value)
@@ -1455,6 +1623,37 @@ export class ThoughtCollector {
 
         // PDF export
         pdfBtn.addEventListener('click', () => this._exportPDF(titleInput.value, preview))
+
+        // Focus mode toggle
+        focusBtn.addEventListener('click', () => this._toggleFocusMode(editorZone))
+
+        // Shortcuts help
+        shortcutsBtn.addEventListener('click', () => this._showShortcutsPanel())
+
+        // Heading jump navigation
+        headingJumpBtn.addEventListener('click', () => this._showHeadingJump(contentArea))
+
+        // Star/favorite toggle
+        starBtn.addEventListener('click', () => {
+            this._toggleStar(file.id)
+            starBtn.querySelector('.btn-text').innerHTML = this._starred.has(file.id) ? '&#9733;' : '&#9734;'
+        })
+
+        // Outline panel
+        outlineBtn.addEventListener('click', () => {
+            this._outlineOpen = !this._outlineOpen
+            this._updateOutlinePanel()
+        })
+
+        // Backlinks panel
+        backlinksBtn.addEventListener('click', () => {
+            this._backlinksOpen = !this._backlinksOpen
+            this._updateBacklinksPanel()
+        })
+
+        // Show outline/backlinks if they were open
+        if (this._outlineOpen) this._updateOutlinePanel()
+        if (this._backlinksOpen) this._updateBacklinksPanel()
 
         preview.addEventListener('click', (e) => {
             // Checkbox click in preview → sync to editor
@@ -1478,6 +1677,17 @@ export class ThoughtCollector {
             btn.addEventListener('click', () => this._setEditorMode(btn.dataset.mode, editorZone))
         })
 
+        const updateStats = () => {
+            const val = contentArea.value
+            const words = val.trim() ? val.trim().split(/\s+/).length : 0
+            const lines = val.split('\n').length
+            const rt = Math.max(1, Math.ceil(words / 200))
+            charCount.textContent = `${val.length} chars`
+            wordCountEl.textContent = `${words} words`
+            lineCountEl.textContent = `${lines} lines`
+            readTimeEl.textContent = `${rt} min read`
+        }
+
         const markDirty = () => {
             this.editorDirty = true
             saveStatus.textContent = 'unsaved'
@@ -1488,7 +1698,7 @@ export class ThoughtCollector {
         titleInput.addEventListener('input', markDirty)
         contentArea.addEventListener('input', () => {
             markDirty()
-            charCount.textContent = `${contentArea.value.length} chars`
+            updateStats()
             clearTimeout(previewTimer)
             previewTimer = setTimeout(() => this._renderPreview(preview, contentArea.value), 100)
             // Schedule autosave
@@ -1547,8 +1757,452 @@ export class ThoughtCollector {
         contentArea.addEventListener('keydown', handleSaveKey)
         titleInput.addEventListener('keydown', handleSaveKey)
 
+        // ── Format toolbar bindings ──────────────────────────
+        this._bindFormatToolbar(contentArea, markDirty, preview)
+
+        // ── Find & Replace (Cmd/Ctrl+F) ─────────────────────
+        this._bindFindReplace(contentArea, markDirty, preview)
+
+        // ── Keyboard shortcuts for formatting (Cmd/Ctrl+B, I, etc.) ──
+        contentArea.addEventListener('keydown', (e) => {
+            this._handleFormatShortcuts(e, contentArea, markDirty, preview)
+        })
+
         // Link insertion button (shown on text selection)
         this._setupLinkToolbar(contentArea, markDirty, preview)
+
+        // Wikilink autocomplete (triggers on [[)
+        this._setupWikilinkAutocomplete(contentArea, markDirty, preview)
+    }
+
+    // ── Format toolbar ──────────────────────────────────────────
+    _bindFormatToolbar(textarea, markDirty, preview) {
+        this.container.querySelectorAll('.fmt-btn').forEach(btn => {
+            btn.addEventListener('mousedown', (e) => {
+                e.preventDefault()  // prevent textarea blur
+            })
+            btn.addEventListener('click', () => {
+                const fmt = btn.dataset.fmt
+                this._applyFormat(fmt, textarea)
+                markDirty()
+                this._renderPreview(preview, textarea.value)
+            })
+        })
+    }
+
+    _applyFormat(fmt, textarea) {
+        const start = textarea.selectionStart
+        const end = textarea.selectionEnd
+        const val = textarea.value
+        const selected = val.slice(start, end)
+        let replacement = ''
+        let cursorOffset = 0
+
+        switch (fmt) {
+            case 'bold':
+                replacement = `**${selected || 'bold text'}**`
+                cursorOffset = selected ? replacement.length : 2
+                break
+            case 'italic':
+                replacement = `*${selected || 'italic text'}*`
+                cursorOffset = selected ? replacement.length : 1
+                break
+            case 'strikethrough':
+                replacement = `~~${selected || 'strikethrough'}~~`
+                cursorOffset = selected ? replacement.length : 2
+                break
+            case 'h1':
+                replacement = this._prependLine('# ', start, val, selected)
+                textarea.value = replacement.val
+                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
+                textarea.dispatchEvent(new Event('input'))
+                textarea.focus()
+                return
+            case 'h2':
+                replacement = this._prependLine('## ', start, val, selected)
+                textarea.value = replacement.val
+                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
+                textarea.dispatchEvent(new Event('input'))
+                textarea.focus()
+                return
+            case 'h3':
+                replacement = this._prependLine('### ', start, val, selected)
+                textarea.value = replacement.val
+                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
+                textarea.dispatchEvent(new Event('input'))
+                textarea.focus()
+                return
+            case 'code':
+                replacement = `\`${selected || 'code'}\``
+                cursorOffset = selected ? replacement.length : 1
+                break
+            case 'codeblock':
+                replacement = `\n\`\`\`\n${selected || 'code here'}\n\`\`\`\n`
+                cursorOffset = selected ? replacement.length : 5
+                break
+            case 'quote':
+                replacement = this._prependLine('> ', start, val, selected)
+                textarea.value = replacement.val
+                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
+                textarea.dispatchEvent(new Event('input'))
+                textarea.focus()
+                return
+            case 'ul':
+                replacement = this._prependLine('- ', start, val, selected)
+                textarea.value = replacement.val
+                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
+                textarea.dispatchEvent(new Event('input'))
+                textarea.focus()
+                return
+            case 'ol':
+                replacement = this._prependLine('1. ', start, val, selected)
+                textarea.value = replacement.val
+                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
+                textarea.dispatchEvent(new Event('input'))
+                textarea.focus()
+                return
+            case 'task':
+                replacement = this._prependLine('- [ ] ', start, val, selected)
+                textarea.value = replacement.val
+                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
+                textarea.dispatchEvent(new Event('input'))
+                textarea.focus()
+                return
+            case 'link':
+                replacement = `[${selected || 'link text'}](url)`
+                cursorOffset = selected ? replacement.length - 4 : 1
+                break
+            case 'image':
+                replacement = `![${selected || 'alt text'}](url)`
+                cursorOffset = selected ? replacement.length - 4 : 2
+                break
+            case 'hr':
+                replacement = '\n---\n'
+                cursorOffset = replacement.length
+                break
+            case 'table':
+                replacement = '\n| Header 1 | Header 2 | Header 3 |\n| --- | --- | --- |\n| Cell 1 | Cell 2 | Cell 3 |\n'
+                cursorOffset = replacement.length
+                break
+            case 'wikilink':
+                replacement = `[[${selected || 'note name'}]]`
+                cursorOffset = selected ? replacement.length : 2
+                break
+            case 'tag':
+                replacement = `#${selected || 'tag'}`
+                cursorOffset = replacement.length
+                break
+            case 'callout':
+                replacement = this._prependLine('> [!note] ', start, val, selected)
+                textarea.value = replacement.val
+                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
+                textarea.dispatchEvent(new Event('input'))
+                textarea.focus()
+                return
+            case 'highlight':
+                replacement = `==${selected || 'highlighted text'}==`
+                cursorOffset = selected ? replacement.length : 2
+                break
+            case 'footnote':
+                replacement = `[^${selected || '1'}]`
+                cursorOffset = replacement.length
+                break
+            default:
+                return
+        }
+
+        textarea.value = val.slice(0, start) + replacement + val.slice(end)
+        textarea.setSelectionRange(start + cursorOffset, start + cursorOffset)
+        textarea.dispatchEvent(new Event('input'))
+        textarea.focus()
+    }
+
+    _prependLine(prefix, cursorPos, val, selected) {
+        const lineStart = val.lastIndexOf('\n', cursorPos - 1) + 1
+        const lineEnd = val.indexOf('\n', cursorPos)
+        const endIdx = lineEnd === -1 ? val.length : lineEnd
+        const currentLine = val.slice(lineStart, endIdx)
+
+        // If line already has the prefix, remove it
+        if (currentLine.startsWith(prefix)) {
+            const newVal = val.slice(0, lineStart) + currentLine.slice(prefix.length) + val.slice(endIdx)
+            return { val: newVal, cursor: cursorPos - prefix.length }
+        }
+
+        // Strip any existing heading/list prefix before adding new one
+        const stripped = currentLine.replace(/^(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|- \[[ xX]\]\s+|>\s+)/, '')
+        const newLine = prefix + stripped
+        const newVal = val.slice(0, lineStart) + newLine + val.slice(endIdx)
+        return { val: newVal, cursor: lineStart + newLine.length }
+    }
+
+    // ── Format keyboard shortcuts (Cmd/Ctrl+B, I, K) ──────────
+    _handleFormatShortcuts(e, textarea, markDirty, preview) {
+        if (!(e.metaKey || e.ctrlKey)) return
+        const key = e.key.toLowerCase()
+        if (key === 'b') {
+            e.preventDefault()
+            this._applyFormat('bold', textarea)
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+        } else if (key === 'i') {
+            e.preventDefault()
+            this._applyFormat('italic', textarea)
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+        } else if (key === 'k') {
+            e.preventDefault()
+            this._applyFormat('link', textarea)
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+        } else if (key === 'e') {
+            e.preventDefault()
+            this._applyFormat('code', textarea)
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+        } else if (key === '/' || key === '?') {
+            e.preventDefault()
+            this._showShortcutsPanel()
+        }
+    }
+
+    // ── Find & Replace ────────────────────────────────────────
+    _bindFindReplace(textarea, markDirty, preview) {
+        const bar = this.container.querySelector('#find-replace-bar')
+        const findInput = this.container.querySelector('#find-input')
+        const replaceInput = this.container.querySelector('#replace-input')
+        const findCount = this.container.querySelector('#find-count')
+        const replaceRow = this.container.querySelector('#replace-row')
+        if (!bar) return
+
+        let matches = []
+        let currentMatch = -1
+
+        const doFind = () => {
+            const query = findInput.value
+            if (!query) { matches = []; currentMatch = -1; findCount.textContent = '0/0'; return }
+            const val = textarea.value.toLowerCase()
+            const q = query.toLowerCase()
+            matches = []
+            let idx = val.indexOf(q)
+            while (idx !== -1) {
+                matches.push(idx)
+                idx = val.indexOf(q, idx + 1)
+            }
+            if (matches.length > 0) {
+                currentMatch = 0
+                highlightMatch()
+            } else {
+                currentMatch = -1
+            }
+            findCount.textContent = matches.length > 0 ? `${currentMatch + 1}/${matches.length}` : '0/0'
+        }
+
+        const highlightMatch = () => {
+            if (currentMatch < 0 || currentMatch >= matches.length) return
+            const pos = matches[currentMatch]
+            const len = findInput.value.length
+            textarea.focus()
+            textarea.setSelectionRange(pos, pos + len)
+            // Scroll into view
+            const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
+            const textBefore = textarea.value.slice(0, pos)
+            const lineNum = textBefore.split('\n').length - 1
+            textarea.scrollTop = lineNum * lineHeight - textarea.clientHeight / 2
+            findCount.textContent = `${currentMatch + 1}/${matches.length}`
+        }
+
+        // Open find bar with Cmd/Ctrl+F
+        const openFind = (e) => {
+            if (e.key === 'f' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault()
+                bar.classList.remove('hidden')
+                findInput.focus()
+                const sel = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd)
+                if (sel) { findInput.value = sel; doFind() }
+            }
+        }
+        textarea.addEventListener('keydown', openFind)
+
+        findInput.addEventListener('input', doFind)
+        findInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault()
+                if (e.shiftKey) { currentMatch = (currentMatch - 1 + matches.length) % matches.length }
+                else { currentMatch = (currentMatch + 1) % matches.length }
+                highlightMatch()
+            }
+            if (e.key === 'Escape') { bar.classList.add('hidden'); textarea.focus() }
+        })
+
+        this.container.querySelector('#find-prev').addEventListener('click', () => {
+            if (!matches.length) return
+            currentMatch = (currentMatch - 1 + matches.length) % matches.length
+            highlightMatch()
+        })
+        this.container.querySelector('#find-next').addEventListener('click', () => {
+            if (!matches.length) return
+            currentMatch = (currentMatch + 1) % matches.length
+            highlightMatch()
+        })
+        this.container.querySelector('#find-toggle-replace').addEventListener('click', () => {
+            replaceRow.classList.toggle('hidden')
+            if (!replaceRow.classList.contains('hidden')) replaceInput.focus()
+        })
+        this.container.querySelector('#find-close').addEventListener('click', () => {
+            bar.classList.add('hidden')
+            textarea.focus()
+        })
+
+        this.container.querySelector('#replace-one').addEventListener('click', () => {
+            if (currentMatch < 0 || !matches.length) return
+            const pos = matches[currentMatch]
+            const len = findInput.value.length
+            const rep = replaceInput.value
+            textarea.value = textarea.value.slice(0, pos) + rep + textarea.value.slice(pos + len)
+            textarea.dispatchEvent(new Event('input'))
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+            doFind()
+        })
+        this.container.querySelector('#replace-all').addEventListener('click', () => {
+            if (!findInput.value) return
+            const query = findInput.value
+            const rep = replaceInput.value
+            // Case-insensitive replace all
+            const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+            textarea.value = textarea.value.replace(regex, rep)
+            textarea.dispatchEvent(new Event('input'))
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+            doFind()
+        })
+    }
+
+    // ── Focus / Zen mode ──────────────────────────────────────
+    _toggleFocusMode(editorZone) {
+        const shell = this.container.querySelector('.app-shell')
+        if (!shell) return
+        shell.classList.toggle('focus-mode')
+        const isActive = shell.classList.contains('focus-mode')
+        const btn = this.container.querySelector('#focus-btn')
+        if (btn) btn.querySelector('.btn-text').textContent = isActive ? 'Exit Focus' : 'Focus'
+    }
+
+    // ── Keyboard Shortcuts Panel ──────────────────────────────
+    _showShortcutsPanel() {
+        const isMac = navigator.platform.includes('Mac')
+        const mod = isMac ? 'Cmd' : 'Ctrl'
+        const shortcuts = [
+            { keys: `${mod}+S`, desc: 'Save' },
+            { keys: `${mod}+P`, desc: 'Command palette' },
+            { keys: `${mod}+O`, desc: 'Quick switcher' },
+            { keys: `${mod}+D`, desc: 'Daily note' },
+            { keys: `${mod}+G`, desc: 'Graph view' },
+            { keys: `${mod}+B`, desc: 'Bold' },
+            { keys: `${mod}+I`, desc: 'Italic' },
+            { keys: `${mod}+K`, desc: 'Insert link' },
+            { keys: `${mod}+E`, desc: 'Inline code' },
+            { keys: `${mod}+F`, desc: 'Find & replace' },
+            { keys: `${mod}+/`, desc: 'This help panel' },
+            { keys: 'Tab', desc: 'Indent list item' },
+            { keys: 'Shift+Tab', desc: 'Outdent list item' },
+            { keys: 'Enter', desc: 'Continue list / blockquote' },
+            { keys: 'Esc', desc: 'Go back' },
+            { keys: `Select + \``, desc: 'Wrap in backticks' },
+            { keys: `Select + *`, desc: 'Wrap in asterisks' },
+            { keys: '[[note]]', desc: 'Internal link (wikilink)' },
+            { keys: '![[note]]', desc: 'Embed another note' },
+            { keys: '#tag', desc: 'Add a tag (clickable)' },
+            { keys: '> [!note]', desc: 'Callout block' },
+            { keys: '==text==', desc: 'Highlight text' },
+            { keys: 'Paste URL on selection', desc: 'Create markdown link' },
+        ]
+
+        const overlay = document.createElement('div')
+        overlay.className = 'modal-overlay'
+        overlay.innerHTML = `
+            <div class="modal-box shortcuts-panel">
+                <div class="modal-title">KEYBOARD SHORTCUTS</div>
+                <div class="shortcuts-list">
+                    ${shortcuts.map(s => `
+                        <div class="shortcut-row">
+                            <kbd class="shortcut-key">${s.keys}</kbd>
+                            <span class="shortcut-desc">${s.desc}</span>
+                        </div>
+                    `).join('')}
+                </div>
+                <div class="modal-actions">
+                    <button class="modal-btn modal-confirm">CLOSE</button>
+                </div>
+            </div>
+        `
+        document.body.appendChild(overlay)
+        const close = () => overlay.remove()
+        overlay.querySelector('.modal-confirm').addEventListener('click', close)
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
+        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close() })
+        overlay.setAttribute('tabindex', '-1')
+        overlay.focus()
+    }
+
+    // ── Heading Jump Navigation ───────────────────────────────
+    _showHeadingJump(textarea) {
+        const lines = textarea.value.split('\n')
+        const headings = []
+        lines.forEach((line, i) => {
+            const match = line.match(/^(#{1,6})\s+(.+)/)
+            if (match) {
+                headings.push({ level: match[1].length, text: match[2], lineIndex: i })
+            }
+        })
+
+        if (!headings.length) {
+            this._toast('No headings found')
+            return
+        }
+
+        const overlay = document.createElement('div')
+        overlay.className = 'modal-overlay'
+        overlay.innerHTML = `
+            <div class="modal-box heading-jump-panel">
+                <div class="modal-title">JUMP TO HEADING</div>
+                <div class="heading-list">
+                    ${headings.map((h, idx) => `
+                        <button class="heading-item" data-idx="${idx}"
+                                style="padding-left: ${(h.level - 1) * 16 + 8}px">
+                            <span class="heading-level">H${h.level}</span>
+                            <span class="heading-text">${this._esc(h.text)}</span>
+                        </button>
+                    `).join('')}
+                </div>
+                <div class="modal-actions">
+                    <button class="modal-btn modal-cancel">CLOSE</button>
+                </div>
+            </div>
+        `
+        document.body.appendChild(overlay)
+
+        const close = () => overlay.remove()
+        overlay.querySelector('.modal-cancel').addEventListener('click', close)
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
+        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close() })
+
+        overlay.querySelectorAll('.heading-item').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const h = headings[parseInt(btn.dataset.idx)]
+                let pos = 0
+                for (let i = 0; i < h.lineIndex; i++) pos += lines[i].length + 1
+                textarea.focus()
+                textarea.setSelectionRange(pos, pos)
+                const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
+                textarea.scrollTop = h.lineIndex * lineHeight - textarea.clientHeight / 3
+                close()
+            })
+        })
+
+        overlay.setAttribute('tabindex', '-1')
+        overlay.focus()
     }
 
     // ── Obsidian-style editor keydown behaviors ────────────────
@@ -1795,6 +2449,123 @@ export class ThoughtCollector {
         }
     }
 
+    // ── Wikilink autocomplete ───────────────────────────────────
+    _setupWikilinkAutocomplete(textarea, markDirty, preview) {
+        let dropdown = null
+        let selectedIdx = 0
+        let candidates = []
+
+        const close = () => {
+            if (dropdown) { dropdown.remove(); dropdown = null }
+            candidates = []
+        }
+
+        const show = (query) => {
+            const allFiles = this._getAllFiles()
+            const q = query.toLowerCase()
+            candidates = allFiles.filter(f => f.title.toLowerCase().includes(q)).slice(0, 8)
+            if (!candidates.length) { close(); return }
+
+            if (!dropdown) {
+                dropdown = document.createElement('div')
+                dropdown.className = 'wikilink-autocomplete'
+                document.body.appendChild(dropdown)
+            }
+
+            selectedIdx = 0
+            const rect = textarea.getBoundingClientRect()
+            // Position near cursor
+            const textBefore = textarea.value.slice(0, textarea.selectionStart)
+            const lines = textBefore.split('\n')
+            const lineNum = lines.length - 1
+            const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
+            const top = rect.top + (lineNum * lineHeight) - textarea.scrollTop + lineHeight + 4
+            const left = rect.left + 16
+
+            dropdown.style.top = `${Math.min(top, window.innerHeight - 200)}px`
+            dropdown.style.left = `${Math.min(left, window.innerWidth - 260)}px`
+
+            render()
+        }
+
+        const render = () => {
+            if (!dropdown) return
+            dropdown.innerHTML = candidates.map((f, i) => `
+                <div class="wikilink-ac-item ${i === selectedIdx ? 'selected' : ''}" data-idx="${i}">
+                    ${this._esc(f.title)}
+                    <span class="wikilink-ac-path">${this._esc(f.folderPath)}</span>
+                </div>
+            `).join('')
+            dropdown.querySelectorAll('.wikilink-ac-item').forEach((el, i) => {
+                el.addEventListener('mousedown', (e) => {
+                    e.preventDefault()
+                    accept(candidates[i])
+                })
+                el.addEventListener('mouseenter', () => {
+                    selectedIdx = i
+                    render()
+                })
+            })
+        }
+
+        const accept = (file) => {
+            // Find the [[ before cursor and replace up to cursor
+            const val = textarea.value
+            const pos = textarea.selectionStart
+            const before = val.slice(0, pos)
+            const openBracket = before.lastIndexOf('[[')
+            if (openBracket === -1) { close(); return }
+            const after = val.slice(pos)
+            const closeBracketIdx = after.indexOf(']]')
+            const endPos = closeBracketIdx !== -1 ? pos + closeBracketIdx + 2 : pos
+            const replacement = `[[${file.title}]]`
+            textarea.value = val.slice(0, openBracket) + replacement + val.slice(endPos)
+            const newPos = openBracket + replacement.length
+            textarea.setSelectionRange(newPos, newPos)
+            textarea.dispatchEvent(new Event('input'))
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+            close()
+            textarea.focus()
+        }
+
+        textarea.addEventListener('input', () => {
+            const val = textarea.value
+            const pos = textarea.selectionStart
+            const before = val.slice(0, pos)
+            // Check if cursor is inside [[ ... (no closing ]])
+            const lastOpen = before.lastIndexOf('[[')
+            const lastClose = before.lastIndexOf(']]')
+            if (lastOpen > lastClose && lastOpen !== -1) {
+                const query = before.slice(lastOpen + 2)
+                if (query.length > 0 && !query.includes('\n')) {
+                    show(query)
+                    return
+                }
+            }
+            close()
+        })
+
+        textarea.addEventListener('keydown', (e) => {
+            if (!dropdown) return
+            if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % candidates.length; render() }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + candidates.length) % candidates.length; render() }
+            else if (e.key === 'Enter' && candidates.length) { e.preventDefault(); accept(candidates[selectedIdx]) }
+            else if (e.key === 'Escape') { e.preventDefault(); close() }
+        })
+
+        textarea.addEventListener('blur', () => setTimeout(close, 200))
+
+        // Cleanup on re-render
+        const zone = this.container.querySelector('#editor-zone')
+        if (zone) {
+            const obs = new MutationObserver(() => {
+                if (!document.body.contains(textarea)) { close(); obs.disconnect() }
+            })
+            obs.observe(document.body, { childList: true, subtree: true })
+        }
+    }
+
     // ── Sync checkbox click in preview → editor text ──────────
     _syncCheckboxToEditor(checkbox, textarea) {
         const isChecked = !checkbox.checked  // it was prevented, so state is pre-click
@@ -1926,6 +2697,552 @@ export class ThoughtCollector {
         printWindow.document.close()
     }
 
+    // ── Wikilink helpers ────────────────────────────────────────
+    _getAllFiles() {
+        const allFolders = foldersAPI.list()
+        const files = []
+        for (const f of allFolders) {
+            for (const file of f.files) {
+                files.push({ ...file, folderId: f.id, folderName: f.name, folderPath: f.path })
+            }
+        }
+        return files
+    }
+
+    _findFileByTitle(title) {
+        const lower = title.toLowerCase().trim()
+        const allFiles = this._getAllFiles()
+        return allFiles.find(f => f.title.toLowerCase() === lower)
+            || allFiles.find(f => f.path.replace(/\.md$/, '').split('/').pop().replace(/-/g, ' ').toLowerCase() === lower)
+    }
+
+    _getBacklinks(currentFile) {
+        if (!currentFile) return []
+        const title = currentFile.title.toLowerCase()
+        const allFiles = this._getAllFiles()
+        const backlinks = []
+        for (const f of allFiles) {
+            if (f.id === currentFile.id) continue
+            const content = f.content || ''
+            // Match [[title]] or [[title|alias]]
+            const wikiRe = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g
+            let match
+            while ((match = wikiRe.exec(content)) !== null) {
+                if (match[1].trim().toLowerCase() === title) {
+                    backlinks.push(f)
+                    break
+                }
+            }
+        }
+        return backlinks
+    }
+
+    // ── Star/favorite files ──────────────────────────────────────
+    _toggleStar(fileId) {
+        if (this._starred.has(fileId)) this._starred.delete(fileId)
+        else this._starred.add(fileId)
+        localStorage.setItem(STARRED_KEY, JSON.stringify([...this._starred]))
+    }
+
+    _addRecent(folderId, fileId, title) {
+        this._recent = this._recent.filter(r => r.fileId !== fileId)
+        this._recent.unshift({ folderId, fileId, title })
+        if (this._recent.length > 10) this._recent = this._recent.slice(0, 10)
+        localStorage.setItem(RECENT_KEY, JSON.stringify(this._recent))
+    }
+
+    // ── Command Palette ─────────────────────────────────────────
+    _showCommandPalette() {
+        const isMac = navigator.platform.includes('Mac')
+        const mod = isMac ? 'Cmd' : 'Ctrl'
+        const commands = [
+            { name: 'Quick Switcher: Open file...', key: `${mod}+O`, action: () => this._showQuickSwitcher() },
+            { name: 'Daily Note: Open today\'s note', key: `${mod}+D`, action: () => this._openDailyNote() },
+            { name: 'Graph View: Show connections', key: `${mod}+G`, action: () => this._showGraphView() },
+            { name: 'New File', action: () => { if (this.currentFolder) this._promptNewFile(); else this._toast('Open a folder first') } },
+            { name: 'New Folder', action: () => this._promptNewFolder(null) },
+            { name: 'Toggle Focus Mode', action: () => { const z = this.container.querySelector('#editor-zone'); if (z) this._toggleFocusMode(z) } },
+            { name: 'Export as PDF', action: () => { const p = this.container.querySelector('#editor-preview'); const t = this.container.querySelector('#file-title'); if (p && t) this._exportPDF(t.value, p) } },
+            { name: 'Toggle Autosave', action: () => { this.autosave = !this.autosave; localStorage.setItem(AUTOSAVE_KEY, this.autosave); this._toast(`Autosave ${this.autosave ? 'on' : 'off'}`) } },
+            { name: 'Toggle Outline Panel', action: () => { this._outlineOpen = !this._outlineOpen; this._updateOutlinePanel() } },
+            { name: 'Toggle Backlinks Panel', action: () => { this._backlinksOpen = !this._backlinksOpen; this._updateBacklinksPanel() } },
+            { name: 'Keyboard Shortcuts', key: `${mod}+/`, action: () => this._showShortcutsPanel() },
+            ...THEMES.map(t => ({ name: `Theme: ${t.label}`, action: () => { this._applyTheme(t.id); this._render() } })),
+            { name: 'Log Out', action: async () => { await auth.logout(); this.onLogout() } },
+        ]
+
+        const overlay = document.createElement('div')
+        overlay.className = 'modal-overlay command-palette-overlay'
+        overlay.innerHTML = `
+            <div class="command-palette">
+                <input class="command-palette-input" placeholder="Type a command..." autofocus />
+                <div class="command-palette-list"></div>
+            </div>
+        `
+        document.body.appendChild(overlay)
+
+        const input = overlay.querySelector('.command-palette-input')
+        const list = overlay.querySelector('.command-palette-list')
+        let selectedIdx = 0
+
+        const renderList = (filter = '') => {
+            const q = filter.toLowerCase()
+            const filtered = commands.filter(c => c.name.toLowerCase().includes(q))
+            selectedIdx = Math.min(selectedIdx, Math.max(0, filtered.length - 1))
+            list.innerHTML = filtered.map((c, i) => `
+                <button class="command-palette-item ${i === selectedIdx ? 'selected' : ''}" data-idx="${i}">
+                    <span class="command-name">${c.name}</span>
+                    ${c.key ? `<kbd class="command-key">${c.key}</kbd>` : ''}
+                </button>
+            `).join('')
+            list.querySelectorAll('.command-palette-item').forEach((btn, i) => {
+                btn.addEventListener('click', () => { close(); filtered[i].action() })
+                btn.addEventListener('mouseenter', () => {
+                    selectedIdx = i
+                    list.querySelectorAll('.command-palette-item').forEach((b, j) => b.classList.toggle('selected', j === i))
+                })
+            })
+            return filtered
+        }
+
+        const close = () => overlay.remove()
+        overlay.addEventListener('click', e => { if (e.target === overlay) close() })
+
+        let filteredCommands = renderList()
+        input.addEventListener('input', () => { selectedIdx = 0; filteredCommands = renderList(input.value) })
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Escape') { close(); return }
+            if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % filteredCommands.length; renderList(input.value) }
+            if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + filteredCommands.length) % filteredCommands.length; renderList(input.value) }
+            if (e.key === 'Enter') { close(); if (filteredCommands[selectedIdx]) filteredCommands[selectedIdx].action() }
+        })
+        input.focus()
+    }
+
+    // ── Quick Switcher ──────────────────────────────────────────
+    _showQuickSwitcher() {
+        const allFiles = this._getAllFiles()
+        const overlay = document.createElement('div')
+        overlay.className = 'modal-overlay command-palette-overlay'
+        overlay.innerHTML = `
+            <div class="command-palette quick-switcher">
+                <input class="command-palette-input" placeholder="Search notes..." autofocus />
+                <div class="command-palette-list"></div>
+            </div>
+        `
+        document.body.appendChild(overlay)
+
+        const input = overlay.querySelector('.command-palette-input')
+        const list = overlay.querySelector('.command-palette-list')
+        let selectedIdx = 0
+
+        const fuzzyMatch = (query, text) => {
+            const q = query.toLowerCase()
+            const t = text.toLowerCase()
+            if (!q) return true
+            let qi = 0
+            for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+                if (t[ti] === q[qi]) qi++
+            }
+            return qi === q.length
+        }
+
+        const renderList = (filter = '') => {
+            let filtered
+            if (!filter) {
+                // Show recent files first, then starred, then all
+                const recentIds = new Set(this._recent.map(r => r.fileId))
+                const starredNotRecent = allFiles.filter(f => this._starred.has(f.id) && !recentIds.has(f.id))
+                const recent = this._recent.map(r => allFiles.find(f => f.id === r.fileId)).filter(Boolean)
+                const rest = allFiles.filter(f => !recentIds.has(f.id) && !this._starred.has(f.id))
+                filtered = [...recent, ...starredNotRecent, ...rest]
+            } else {
+                filtered = allFiles.filter(f => fuzzyMatch(filter, f.title) || fuzzyMatch(filter, f.folderPath + '/' + f.title))
+            }
+            filtered = filtered.slice(0, 20)
+            selectedIdx = Math.min(selectedIdx, Math.max(0, filtered.length - 1))
+
+            list.innerHTML = filtered.map((f, i) => `
+                <button class="command-palette-item ${i === selectedIdx ? 'selected' : ''}" data-idx="${i}">
+                    <span class="command-name">
+                        ${this._starred.has(f.id) ? '<span class="star-icon">&#9733;</span> ' : ''}${this._esc(f.title)}
+                    </span>
+                    <span class="command-key switcher-path">${this._esc(f.folderPath)}</span>
+                </button>
+            `).join('')
+
+            list.querySelectorAll('.command-palette-item').forEach((btn, i) => {
+                btn.addEventListener('click', () => { close(); openFile(filtered[i]) })
+                btn.addEventListener('mouseenter', () => {
+                    selectedIdx = i
+                    list.querySelectorAll('.command-palette-item').forEach((b, j) => b.classList.toggle('selected', j === i))
+                })
+            })
+            return filtered
+        }
+
+        const openFile = async (f) => {
+            const folder = foldersAPI.list().find(fl => fl.id === f.folderId)
+            if (!folder) return
+            this.currentFolder = folder
+            this._openFile(f)
+        }
+
+        const close = () => overlay.remove()
+        overlay.addEventListener('click', e => { if (e.target === overlay) close() })
+
+        let filteredFiles = renderList()
+        input.addEventListener('input', () => { selectedIdx = 0; filteredFiles = renderList(input.value) })
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Escape') { close(); return }
+            if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % filteredFiles.length; renderList(input.value) }
+            if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + filteredFiles.length) % filteredFiles.length; renderList(input.value) }
+            if (e.key === 'Enter') { close(); if (filteredFiles[selectedIdx]) openFile(filteredFiles[selectedIdx]) }
+        })
+        input.focus()
+    }
+
+    // ── Daily Note ──────────────────────────────────────────────
+    async _openDailyNote() {
+        const today = new Date()
+        const dateStr = today.toISOString().split('T')[0] // YYYY-MM-DD
+        const title = dateStr
+
+        // Find or create daily-notes folder
+        let dailyFolder = foldersAPI.listRoots().find(f => f.path === DAILY_FOLDER || f.name.toLowerCase() === 'daily notes')
+        if (!dailyFolder) {
+            try {
+                dailyFolder = await foldersAPI.create('Daily Notes', null)
+            } catch (err) {
+                this._toast(`Error creating daily notes folder: ${err.message}`)
+                return
+            }
+        }
+        dailyFolder = foldersAPI.list().find(f => f.id === dailyFolder.id) || dailyFolder
+
+        // Find existing daily note
+        const existing = dailyFolder.files.find(f => f.title === title || f.title === dateStr)
+        if (existing) {
+            this.currentFolder = dailyFolder
+            this._openFile(existing)
+            return
+        }
+
+        // Create new daily note
+        const dayName = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+        const content = `# ${dayName}\n\n`
+        try {
+            const file = await filesAPI.create(dailyFolder.id, title, content)
+            this.currentFolder = foldersAPI.list().find(f => f.id === dailyFolder.id) || dailyFolder
+            this._openFile(file)
+        } catch (err) {
+            this._toast(`Error creating daily note: ${err.message}`)
+        }
+    }
+
+    // ── Graph View ──────────────────────────────────────────────
+    _showGraphView() {
+        const allFiles = this._getAllFiles()
+        // Build adjacency map from wikilinks
+        const nodes = allFiles.map(f => ({ id: f.id, title: f.title, folderId: f.folderId }))
+        const edges = []
+        const titleToId = {}
+        for (const f of allFiles) {
+            titleToId[f.title.toLowerCase()] = f.id
+        }
+        for (const f of allFiles) {
+            const content = f.content || ''
+            const wikiRe = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g
+            let match
+            while ((match = wikiRe.exec(content)) !== null) {
+                const target = match[1].trim().toLowerCase()
+                const targetId = titleToId[target]
+                if (targetId && targetId !== f.id) {
+                    edges.push({ from: f.id, to: targetId })
+                }
+            }
+        }
+
+        const overlay = document.createElement('div')
+        overlay.className = 'modal-overlay graph-view-overlay'
+        overlay.innerHTML = `
+            <div class="graph-view-container">
+                <div class="graph-view-header">
+                    <span class="graph-view-title">Graph View</span>
+                    <span class="graph-view-stats">${nodes.length} notes, ${edges.length} links</span>
+                    <button class="graph-view-close">&times;</button>
+                </div>
+                <canvas id="graph-canvas" class="graph-canvas"></canvas>
+            </div>
+        `
+        document.body.appendChild(overlay)
+
+        const close = () => overlay.remove()
+        overlay.querySelector('.graph-view-close').addEventListener('click', close)
+        overlay.addEventListener('click', e => { if (e.target === overlay) close() })
+        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') close() })
+        overlay.setAttribute('tabindex', '-1')
+        overlay.focus()
+
+        // Render graph with force-directed layout
+        const canvas = overlay.querySelector('#graph-canvas')
+        const container = overlay.querySelector('.graph-view-container')
+        const rect = container.getBoundingClientRect()
+        canvas.width = rect.width
+        canvas.height = rect.height - 50
+        const ctx = canvas.getContext('2d')
+
+        if (nodes.length === 0) {
+            ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--nc-text-dim').trim() || '#666'
+            ctx.font = '14px sans-serif'
+            ctx.textAlign = 'center'
+            ctx.fillText('No notes yet', canvas.width / 2, canvas.height / 2)
+            return
+        }
+
+        // Initialize positions randomly
+        const positions = {}
+        const velocities = {}
+        for (const n of nodes) {
+            positions[n.id] = { x: Math.random() * canvas.width * 0.6 + canvas.width * 0.2, y: Math.random() * canvas.height * 0.6 + canvas.height * 0.2 }
+            velocities[n.id] = { x: 0, y: 0 }
+        }
+
+        // Connected nodes set (for sizing)
+        const connected = new Set()
+        for (const e of edges) { connected.add(e.from); connected.add(e.to) }
+
+        const accentColor = getComputedStyle(document.documentElement).getPropertyValue('--t-accent').trim() || '#ff003c'
+        const accent2Color = getComputedStyle(document.documentElement).getPropertyValue('--t-accent2').trim() || '#00f5ff'
+        const textColor = getComputedStyle(document.documentElement).getPropertyValue('--nc-text').trim() || '#c8d8e4'
+        const dimColor = getComputedStyle(document.documentElement).getPropertyValue('--nc-text-dim').trim() || '#4a5568'
+
+        let hoveredNode = null
+        let dragNode = null
+
+        canvas.addEventListener('mousemove', (e) => {
+            const r = canvas.getBoundingClientRect()
+            const mx = e.clientX - r.left, my = e.clientY - r.top
+            hoveredNode = null
+            for (const n of nodes) {
+                const p = positions[n.id]
+                const dist = Math.sqrt((p.x - mx) ** 2 + (p.y - my) ** 2)
+                if (dist < 12) { hoveredNode = n; break }
+            }
+            canvas.style.cursor = hoveredNode ? 'pointer' : 'default'
+            if (dragNode) {
+                positions[dragNode.id].x = mx
+                positions[dragNode.id].y = my
+            }
+        })
+        canvas.addEventListener('mousedown', () => { if (hoveredNode) dragNode = hoveredNode })
+        canvas.addEventListener('mouseup', () => { dragNode = null })
+        canvas.addEventListener('dblclick', () => {
+            if (hoveredNode) {
+                close()
+                const f = allFiles.find(fi => fi.id === hoveredNode.id)
+                if (f) {
+                    const folder = foldersAPI.list().find(fl => fl.id === f.folderId)
+                    if (folder) { this.currentFolder = folder; this._openFile(f) }
+                }
+            }
+        })
+
+        // Force simulation
+        let animFrame
+        const simulate = () => {
+            // Repulsion between all nodes
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    const a = positions[nodes[i].id], b = positions[nodes[j].id]
+                    let dx = b.x - a.x, dy = b.y - a.y
+                    let dist = Math.sqrt(dx * dx + dy * dy) || 1
+                    const force = 800 / (dist * dist)
+                    const fx = (dx / dist) * force, fy = (dy / dist) * force
+                    velocities[nodes[i].id].x -= fx; velocities[nodes[i].id].y -= fy
+                    velocities[nodes[j].id].x += fx; velocities[nodes[j].id].y += fy
+                }
+            }
+            // Attraction along edges
+            for (const e of edges) {
+                const a = positions[e.from], b = positions[e.to]
+                let dx = b.x - a.x, dy = b.y - a.y
+                let dist = Math.sqrt(dx * dx + dy * dy) || 1
+                const force = (dist - 100) * 0.005
+                const fx = (dx / dist) * force, fy = (dy / dist) * force
+                velocities[e.from].x += fx; velocities[e.from].y += fy
+                velocities[e.to].x -= fx; velocities[e.to].y -= fy
+            }
+            // Center gravity
+            for (const n of nodes) {
+                const p = positions[n.id], v = velocities[n.id]
+                v.x += (canvas.width / 2 - p.x) * 0.0005
+                v.y += (canvas.height / 2 - p.y) * 0.0005
+                v.x *= 0.85; v.y *= 0.85
+                if (dragNode?.id !== n.id) { p.x += v.x; p.y += v.y }
+                p.x = Math.max(20, Math.min(canvas.width - 20, p.x))
+                p.y = Math.max(20, Math.min(canvas.height - 20, p.y))
+            }
+
+            // Draw
+            ctx.clearRect(0, 0, canvas.width, canvas.height)
+            // Edges
+            for (const e of edges) {
+                const a = positions[e.from], b = positions[e.to]
+                ctx.beginPath()
+                ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y)
+                ctx.strokeStyle = dimColor
+                ctx.lineWidth = (hoveredNode && (e.from === hoveredNode.id || e.to === hoveredNode.id)) ? 2 : 0.5
+                if (hoveredNode && (e.from === hoveredNode.id || e.to === hoveredNode.id)) ctx.strokeStyle = accent2Color
+                ctx.stroke()
+            }
+            // Nodes
+            for (const n of nodes) {
+                const p = positions[n.id]
+                const isHovered = hoveredNode?.id === n.id
+                const isConnected = connected.has(n.id)
+                const radius = isHovered ? 8 : (isConnected ? 5 : 3)
+                ctx.beginPath()
+                ctx.arc(p.x, p.y, radius, 0, Math.PI * 2)
+                ctx.fillStyle = isHovered ? accentColor : (isConnected ? accent2Color : dimColor)
+                ctx.fill()
+                if (isHovered || (hoveredNode && edges.some(e => (e.from === hoveredNode.id && e.to === n.id) || (e.to === hoveredNode.id && e.from === n.id)))) {
+                    ctx.font = '11px sans-serif'
+                    ctx.fillStyle = textColor
+                    ctx.textAlign = 'center'
+                    ctx.fillText(n.title, p.x, p.y - radius - 4)
+                }
+            }
+            animFrame = requestAnimationFrame(simulate)
+        }
+        simulate()
+
+        // Cleanup on close
+        const origClose = close
+        const cleanClose = () => { cancelAnimationFrame(animFrame); origClose() }
+        overlay.querySelector('.graph-view-close').removeEventListener('click', origClose)
+        overlay.querySelector('.graph-view-close').addEventListener('click', cleanClose)
+        overlay.removeEventListener('click', origClose)
+        overlay.addEventListener('click', e => { if (e.target === overlay) cleanClose() })
+        overlay.removeEventListener('keydown', close)
+        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') cleanClose() })
+    }
+
+    // ── Outline Panel ───────────────────────────────────────────
+    _updateOutlinePanel() {
+        const existing = this.container.querySelector('.outline-panel')
+        if (!this._outlineOpen || this.view !== 'editor') {
+            if (existing) existing.remove()
+            return
+        }
+        const textarea = this.container.querySelector('#file-content')
+        if (!textarea) return
+
+        const lines = textarea.value.split('\n')
+        const headings = []
+        lines.forEach((line, i) => {
+            const match = line.match(/^(#{1,6})\s+(.+)/)
+            if (match) headings.push({ level: match[1].length, text: match[2], lineIndex: i })
+        })
+
+        if (existing) existing.remove()
+        const panel = document.createElement('div')
+        panel.className = 'outline-panel'
+        panel.innerHTML = `
+            <div class="outline-header">
+                <span>Outline</span>
+                <button class="outline-close">&times;</button>
+            </div>
+            <div class="outline-list">
+                ${headings.length ? headings.map((h, idx) => `
+                    <button class="outline-item" data-idx="${idx}" style="padding-left: ${(h.level - 1) * 12 + 8}px">
+                        <span class="outline-level">H${h.level}</span>
+                        <span class="outline-text">${this._esc(h.text)}</span>
+                    </button>
+                `).join('') : '<p class="outline-empty">No headings</p>'}
+            </div>
+        `
+        const editorZone = this.container.querySelector('#editor-zone')
+        if (editorZone) editorZone.appendChild(panel)
+
+        panel.querySelector('.outline-close').addEventListener('click', () => {
+            this._outlineOpen = false
+            panel.remove()
+        })
+        panel.querySelectorAll('.outline-item').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const h = headings[parseInt(btn.dataset.idx)]
+                let pos = 0
+                for (let i = 0; i < h.lineIndex; i++) pos += lines[i].length + 1
+                textarea.focus()
+                textarea.setSelectionRange(pos, pos)
+                const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
+                textarea.scrollTop = h.lineIndex * lineHeight - textarea.clientHeight / 3
+            })
+        })
+    }
+
+    // ── Backlinks Panel ─────────────────────────────────────────
+    _updateBacklinksPanel() {
+        const existing = this.container.querySelector('.backlinks-panel')
+        if (!this._backlinksOpen || this.view !== 'editor' || !this.currentFile) {
+            if (existing) existing.remove()
+            return
+        }
+        const backlinks = this._getBacklinks(this.currentFile)
+
+        if (existing) existing.remove()
+        const panel = document.createElement('div')
+        panel.className = 'backlinks-panel'
+        panel.innerHTML = `
+            <div class="backlinks-header">
+                <span>Backlinks (${backlinks.length})</span>
+                <button class="backlinks-close">&times;</button>
+            </div>
+            <div class="backlinks-list">
+                ${backlinks.length ? backlinks.map(f => `
+                    <button class="backlinks-item" data-folder-id="${f.folderId}" data-file-id="${f.id}">
+                        <span class="backlinks-name">${this._esc(f.title)}</span>
+                        <span class="backlinks-path">${this._esc(f.folderPath)}</span>
+                    </button>
+                `).join('') : '<p class="backlinks-empty">No backlinks found</p>'}
+            </div>
+        `
+        const editorZone = this.container.querySelector('#editor-zone')
+        if (editorZone) editorZone.appendChild(panel)
+
+        panel.querySelector('.backlinks-close').addEventListener('click', () => {
+            this._backlinksOpen = false
+            panel.remove()
+        })
+        panel.querySelectorAll('.backlinks-item').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
+                if (!folder) return
+                const file = folder.files.find(f => f.id === btn.dataset.fileId)
+                if (!file) return
+                if (this.editorDirty) {
+                    const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                    if (!ok) return
+                }
+                this.editorDirty = false
+                this.currentFolder = folder
+                this._openFile(file)
+            })
+        })
+    }
+
+    // ── Tag extraction ──────────────────────────────────────────
+    _extractTags(content) {
+        const tags = new Set()
+        const tagRe = /(?:^|\s)#([a-zA-Z][a-zA-Z0-9_/-]*)/g
+        let match
+        while ((match = tagRe.exec(content)) !== null) {
+            tags.add(match[1].toLowerCase())
+        }
+        return [...tags]
+    }
+
     // ── Math normalisation ────────────────────────────────────
     _normaliseMath(md) {
         md = md.replace(/^\s*\[\s*\n([\s\S]*?)\n\s*\]\s*$/gm, (_, inner) => `$$${inner.trim()}$$`)
@@ -1934,9 +3251,43 @@ export class ThoughtCollector {
         return md
     }
 
+    // ── Pre-process markdown for Obsidian features ─────────────
+    _preprocessMarkdown(md) {
+        // Wikilinks: [[note]] → clickable link, [[note|alias]] → alias text
+        md = md.replace(/!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, alias) => {
+            return `<div class="embed-block" data-embed="${this._esc(target.trim())}">${alias || target.trim()}</div>`
+        })
+        md = md.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, target, alias) => {
+            const display = alias || target.trim()
+            return `<a class="wikilink" data-target="${this._esc(target.trim())}">${this._esc(display)}</a>`
+        })
+
+        // Tags: #tag → styled span
+        md = md.replace(/(?:^|\s)#([a-zA-Z][a-zA-Z0-9_/-]*)/g, (match, tag) => {
+            const prefix = match.startsWith(' ') || match.startsWith('\n') ? match[0] : ''
+            return `${prefix}<span class="tag-pill" data-tag="${tag.toLowerCase()}">#${tag}</span>`
+        })
+
+        // Callout blocks: > [!type] title
+        md = md.replace(/^(>\s*)\[!(note|tip|warning|danger|info|abstract|todo|example|quote|bug|success|failure|question)\]\s*(.*)$/gim, (_, prefix, type, title) => {
+            return `${prefix}<div class="callout callout-${type.toLowerCase()}"><div class="callout-title">${type.toUpperCase()}${title ? ': ' + title : ''}</div>`
+        })
+
+        // Highlight ==text== → <mark>text</mark>
+        md = md.replace(/==(.*?)==/g, '<mark>$1</mark>')
+
+        // Footnotes: [^1] → superscript link, [^1]: → definition
+        md = md.replace(/\[\^(\w+)\](?!:)/g, '<sup class="footnote-ref"><a href="#fn-$1" id="fnref-$1">$1</a></sup>')
+        md = md.replace(/^\[\^(\w+)\]:\s*(.+)$/gm, '<div class="footnote" id="fn-$1"><sup>$1</sup> $2 <a href="#fnref-$1" class="footnote-back">&#x21A9;</a></div>')
+
+        return md
+    }
+
     // ── Render preview with source line tracking ──────────────
     _renderPreview(previewEl, markdown) {
-        const normalised = this._normaliseMath(markdown || '')
+        let normalised = this._normaliseMath(markdown || '')
+        normalised = this._preprocessMarkdown(normalised)
+
         if (typeof marked !== 'undefined') {
             previewEl.innerHTML = marked.parse(normalised)
         } else {
@@ -1949,10 +3300,87 @@ export class ThoughtCollector {
             cb.style.cursor = 'pointer'
         })
 
-        // Apply special monospace formatting for ==code== (highlight) - already handled by marked
         // Style inline code with extra LaTeX-like monospace emphasis
         previewEl.querySelectorAll('code:not(pre code)').forEach(el => {
             el.classList.add('inline-code-tt')
+        })
+
+        // Syntax highlighting with highlight.js
+        if (typeof hljs !== 'undefined') {
+            previewEl.querySelectorAll('pre code').forEach(block => {
+                // Check for mermaid blocks
+                if (block.className.includes('language-mermaid') || block.textContent.trim().startsWith('graph ') || block.textContent.trim().startsWith('sequenceDiagram') || block.textContent.trim().startsWith('flowchart')) {
+                    const mermaidDiv = document.createElement('div')
+                    mermaidDiv.className = 'mermaid'
+                    mermaidDiv.textContent = block.textContent
+                    block.closest('pre').replaceWith(mermaidDiv)
+                    return
+                }
+                hljs.highlightElement(block)
+            })
+        }
+
+        // Render mermaid diagrams
+        if (typeof mermaid !== 'undefined') {
+            try {
+                mermaid.initialize({ startOnLoad: false, theme: 'dark' })
+                mermaid.run({ nodes: previewEl.querySelectorAll('.mermaid') })
+            } catch { /* mermaid parse errors are non-fatal */ }
+        }
+
+        // Wikilink click handling
+        previewEl.querySelectorAll('.wikilink').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault()
+                const target = link.dataset.target
+                const file = this._findFileByTitle(target)
+                if (file) {
+                    const folder = foldersAPI.list().find(f => f.id === file.folderId)
+                    if (folder) {
+                        this.currentFolder = folder
+                        this._openFile(file)
+                    }
+                } else {
+                    // Offer to create the note
+                    this._showModal({ type: 'confirm', title: 'CREATE NOTE', message: `"${target}" doesn't exist. Create it?` })
+                        .then(ok => {
+                            if (!ok || !this.currentFolder) return
+                            filesAPI.create(this.currentFolder.id, target)
+                                .then(newFile => {
+                                    this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
+                                    this._openFile(newFile)
+                                })
+                                .catch(err => this._toast(`Error: ${err.message}`))
+                        })
+                }
+            })
+        })
+
+        // Tag click handling
+        previewEl.querySelectorAll('.tag-pill').forEach(tag => {
+            tag.addEventListener('click', () => {
+                this._searchByTag(tag.dataset.tag)
+            })
+        })
+
+        // Handle embeds - load referenced note content inline
+        previewEl.querySelectorAll('.embed-block').forEach(async (block) => {
+            const target = block.dataset.embed
+            const file = this._findFileByTitle(target)
+            if (file) {
+                try {
+                    let content = file.content || ''
+                    if (!file.contentLoaded && file.path) {
+                        content = await vaultAPI.readFile(file.path)
+                    }
+                    const embedHtml = typeof marked !== 'undefined' ? marked.parse(content) : content
+                    block.innerHTML = `<div class="embed-content"><div class="embed-title">${this._esc(file.title)}</div>${embedHtml}</div>`
+                } catch {
+                    block.innerHTML = `<div class="embed-error">Could not load: ${this._esc(target)}</div>`
+                }
+            } else {
+                block.innerHTML = `<div class="embed-error">Note not found: ${this._esc(target)}</div>`
+            }
         })
 
         // Render math with KaTeX
@@ -1968,6 +3396,53 @@ export class ThoughtCollector {
                 ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
             })
         }
+    }
+
+    // ── Search by tag ───────────────────────────────────────────
+    _searchByTag(tag) {
+        const allFiles = this._getAllFiles()
+        const matching = allFiles.filter(f => {
+            const content = f.content || ''
+            const tagRe = new RegExp(`(?:^|\\s)#${tag}(?:\\s|$)`, 'im')
+            return tagRe.test(content)
+        })
+
+        const overlay = document.createElement('div')
+        overlay.className = 'modal-overlay command-palette-overlay'
+        overlay.innerHTML = `
+            <div class="command-palette">
+                <div class="tag-search-header">
+                    <span class="tag-pill" style="pointer-events:none">#${this._esc(tag)}</span>
+                    <span class="tag-search-count">${matching.length} note${matching.length !== 1 ? 's' : ''}</span>
+                </div>
+                <div class="command-palette-list">
+                    ${matching.map(f => `
+                        <button class="command-palette-item" data-folder-id="${f.folderId}" data-file-id="${f.id}">
+                            <span class="command-name">${this._esc(f.title)}</span>
+                            <span class="command-key switcher-path">${this._esc(f.folderPath)}</span>
+                        </button>
+                    `).join('') || '<p class="outline-empty">No matching notes</p>'}
+                </div>
+            </div>
+        `
+        document.body.appendChild(overlay)
+        const close = () => overlay.remove()
+        overlay.addEventListener('click', e => { if (e.target === overlay) close() })
+        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') close() })
+        overlay.setAttribute('tabindex', '-1')
+        overlay.focus()
+
+        overlay.querySelectorAll('.command-palette-item').forEach(btn => {
+            btn.addEventListener('click', () => {
+                close()
+                const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
+                if (!folder) return
+                const file = folder.files.find(f => f.id === btn.dataset.fileId)
+                if (!file) return
+                this.currentFolder = folder
+                this._openFile(file)
+            })
+        })
     }
 
     _setEditorMode(mode, editorZone) {
@@ -1990,25 +3465,22 @@ export class ThoughtCollector {
         }
     }
 
-    // ── Saving overlay (blocks navigation during save) ────────
+    // ── Saving indicator (non-blocking) ─────────────────────────
     _showSavingOverlay() {
         if (document.getElementById('saving-overlay')) return
         const el = document.createElement('div')
         el.id = 'saving-overlay'
-        el.className = 'saving-overlay'
-        el.innerHTML = `
-            <div class="saving-overlay-box">
-                <span class="saving-label">Saving...</span>
-            </div>
-        `
-        // Prevent clicks from passing through
-        el.addEventListener('click', (e) => e.stopPropagation())
+        el.className = 'saving-indicator'
+        el.innerHTML = '<span class="saving-label">Saving...</span>'
         document.body.appendChild(el)
+        setTimeout(() => el.classList.add('visible'), 10)
     }
 
     _hideSavingOverlay() {
         const el = document.getElementById('saving-overlay')
-        if (el) el.remove()
+        if (!el) return
+        el.classList.remove('visible')
+        setTimeout(() => el.remove(), 200)
     }
 
     // ── Progress toast ────────────────────────────────────────

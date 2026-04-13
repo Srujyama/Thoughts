@@ -224,18 +224,62 @@ export const vaultAPI = {
 // folder.parentId = id of parent folder, or null for root
 // file.path    = full storage path, e.g. "notes/archive/my-file.md"
 
+// ── In-memory meta cache (avoids repeated JSON.parse from localStorage) ──
+let _metaCache = null
+let _metaCacheKey = null
+
+// ── Content cache (sessionStorage for recently opened files) ──
+const CONTENT_CACHE_PREFIX = 'nc_fcache_'
+const CONTENT_CACHE_MAX = 50
+
+function _cacheContent(filePath, content) {
+    try {
+        sessionStorage.setItem(CONTENT_CACHE_PREFIX + filePath, content)
+        // Evict oldest entries if too many
+        const keys = []
+        for (let i = 0; i < sessionStorage.length; i++) {
+            const k = sessionStorage.key(i)
+            if (k.startsWith(CONTENT_CACHE_PREFIX)) keys.push(k)
+        }
+        if (keys.length > CONTENT_CACHE_MAX) {
+            // Remove first (oldest) entries
+            keys.slice(0, keys.length - CONTENT_CACHE_MAX).forEach(k => sessionStorage.removeItem(k))
+        }
+    } catch { /* quota exceeded — ignore */ }
+}
+
+function _getCachedContent(filePath) {
+    try { return sessionStorage.getItem(CONTENT_CACHE_PREFIX + filePath) }
+    catch { return null }
+}
+
+// ── Cloud sync dedup — only one sync in-flight at a time ──
+let _syncPromise = null
+let _lastSyncTime = 0
+const SYNC_MIN_INTERVAL = 5000  // minimum 5s between syncs
+
 function metaKey() {
     const user = auth.getUser()
     return user ? `nc_vault_meta_${user.user_id}` : 'nc_vault_meta_anon'
 }
 
 function loadMeta() {
-    try { return JSON.parse(localStorage.getItem(metaKey())) || { folders: [] } }
-    catch { return { folders: [] } }
+    const key = metaKey()
+    // Return in-memory cache if available and same user
+    if (_metaCache && _metaCacheKey === key) return _metaCache
+    try {
+        _metaCache = JSON.parse(localStorage.getItem(key)) || { folders: [] }
+    } catch {
+        _metaCache = { folders: [] }
+    }
+    _metaCacheKey = key
+    return _metaCache
 }
 
 function saveMeta(meta) {
-    localStorage.setItem(metaKey(), JSON.stringify(meta))
+    _metaCache = meta
+    _metaCacheKey = metaKey()
+    localStorage.setItem(_metaCacheKey, JSON.stringify(meta))
 }
 
 function uid() { return crypto.randomUUID() }
@@ -330,11 +374,24 @@ function syncMetaFromCloud(rawFiles, meta) {
 
 export const foldersAPI = {
     async listFromCloud() {
-        const rawFiles = await vaultAPI.listFiles()
-        let meta = loadMeta()
-        meta = syncMetaFromCloud(rawFiles, meta)
-        saveMeta(meta)
-        return meta.folders
+        // Dedup: reuse in-flight sync if called multiple times quickly
+        const now = Date.now()
+        if (_syncPromise && (now - _lastSyncTime) < SYNC_MIN_INTERVAL) {
+            return _syncPromise
+        }
+        _lastSyncTime = now
+        _syncPromise = (async () => {
+            try {
+                const rawFiles = await vaultAPI.listFiles()
+                let meta = loadMeta()
+                meta = syncMetaFromCloud(rawFiles, meta)
+                saveMeta(meta)
+                return meta.folders
+            } finally {
+                _syncPromise = null
+            }
+        })()
+        return _syncPromise
     },
 
     list() {
@@ -500,9 +557,18 @@ export const filesAPI = {
         const file = folder.files.find(f => f.id === fileId)
         if (!file) throw new Error('File not found')
 
+        // Show cached content instantly if available, then refresh from cloud
+        const cached = _getCachedContent(file.path)
+        if (cached !== null && !file.contentLoaded) {
+            file.content = cached
+            file.contentLoaded = true
+        }
+
         // Always fetch fresh content from cloud so edits on other devices are visible
-        file.content = await vaultAPI.readFile(file.path)
+        const freshContent = await vaultAPI.readFile(file.path)
+        file.content = freshContent
         file.contentLoaded = true
+        _cacheContent(file.path, freshContent)
         saveMeta(meta)
         return file
     },
@@ -517,6 +583,7 @@ export const filesAPI = {
         if (title !== undefined) file.title = title.trim()
         if (content !== undefined) {
             file.content = content
+            _cacheContent(file.path, content)
             await vaultAPI.writeFile(file.path, content)
         }
         file.updated_at = new Date().toISOString()

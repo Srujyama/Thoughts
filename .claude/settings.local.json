@@ -43,7 +43,8 @@
       "Bash(git commit -m \"Silence SYNC ERROR on cold start — retry once after 5s\")",
       "Bash(git push)",
       "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts add src/app.js)",
-      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts commit -m \"Silence SYNC ERROR on cold start — retry once after 5s\")"
+      "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts commit -m \"Silence SYNC ERROR on cold start — retry once after 5s\")",
+      "Bash(npx vite:*)"
     ]
   }
 }
