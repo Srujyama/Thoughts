@@ -5,8 +5,20 @@ import { auth, setSessionExpiredHandler } from './api.js'
 
 const appEl = document.querySelector('#app')
 
+function applySavedTheme() {
+    const saved = localStorage.getItem('nc_theme') || 'system'
+    if (saved === 'system') {
+        const resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'black' : 'white'
+        document.documentElement.setAttribute('data-theme', resolved)
+    } else {
+        const migrations = { light: 'white', dark: 'black', docs: 'white' }
+        document.documentElement.setAttribute('data-theme', migrations[saved] || saved)
+    }
+}
+
 function showAuthView() {
-    const controller = new AuthController(appEl, () => showAppView())
+    applySavedTheme()
+    const controller = new AuthController(appEl, () => showAppView(), () => showDocs())
     controller.render()
 }
 
@@ -16,32 +28,12 @@ function showAppView() {
     new ThoughtCollector(appEl, () => showAuthView())
 }
 
-// When session expires (token can't be refreshed), go back to login
-setSessionExpiredHandler(() => {
-    showAuthView()
-})
-
-function init() {
-    // Check for docs route
-    if (location.hash === '#/docs') {
-        showDocs()
-        return
-    }
-
-    // Fast auth check — just look for token in localStorage (no network call)
-    if (auth.isAuthed()) {
-        // Show app immediately from local cache, token refresh happens async
-        showAppView()
-    } else {
-        showAuthView()
-    }
-}
-
 function showDocs() {
+    applySavedTheme()
     appEl.innerHTML = `
         <div class="docs-page">
             <header class="docs-header">
-                <a href="#/" class="docs-back">&larr; back</a>
+                <button class="docs-back" id="docs-back-btn">&larr; back</button>
                 <h1>thoughts</h1>
             </header>
             <div class="docs-body">
@@ -83,19 +75,25 @@ function showDocs() {
             </div>
         </div>
     `
-    document.querySelector('.docs-back').addEventListener('click', (e) => {
-        e.preventDefault()
-        location.hash = '#/'
-        init()
+    document.getElementById('docs-back-btn').addEventListener('click', () => {
+        showAuthView()
     })
 }
 
-// Listen for hash changes (for docs navigation)
-window.addEventListener('hashchange', () => {
-    if (location.hash === '#/docs') {
-        showDocs()
-    }
+// When session expires (token can't be refreshed), go back to login
+setSessionExpiredHandler(() => {
+    showAuthView()
 })
+
+function init() {
+    // Fast auth check — just look for token in localStorage (no network call)
+    if (auth.isAuthed()) {
+        // Show app immediately from local cache, token refresh happens async
+        showAppView()
+    } else {
+        showAuthView()
+    }
+}
 
 // Run init as soon as possible
 if (document.readyState === 'loading') {

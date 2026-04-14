@@ -2,9 +2,10 @@
 import { auth } from './api.js'
 
 export class AuthController {
-    constructor(containerEl, onAuthSuccess) {
+    constructor(containerEl, onAuthSuccess, onShowDocs) {
         this.container = containerEl
         this.onAuthSuccess = onAuthSuccess
+        this.onShowDocs = onShowDocs
         this._mode = 'login'   // 'login' | 'signup'
     }
 
@@ -62,7 +63,7 @@ export class AuthController {
                     <span>2026</span>
                 </div>
 
-                <a href="#/docs" class="auth-docs-link">docs</a>
+                <button type="button" class="auth-docs-link" id="auth-docs-btn">docs</button>
 
                 <div class="scanlines"></div>
             </div>
@@ -76,6 +77,10 @@ export class AuthController {
         this.container.querySelector('#auth-form').addEventListener('submit', (e) => {
             e.preventDefault()
             this._handleSubmit()
+        })
+
+        this.container.querySelector('#auth-docs-btn').addEventListener('click', () => {
+            if (this.onShowDocs) this.onShowDocs()
         })
 
         this.container.querySelector('#toggle-mode').addEventListener('click', () => {
