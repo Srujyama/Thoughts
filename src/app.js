@@ -1,5 +1,5 @@
 // src/app.js
-import { foldersAPI, filesAPI, auth, vaultAPI } from './api.js'
+import { foldersAPI, filesAPI, auth, vaultAPI, syncStatus } from './api.js'
 
 const EDITOR_MODE_KEY  = 'nc_editor_mode'
 const THEME_KEY        = 'nc_theme'
@@ -136,6 +136,41 @@ export class ThoughtCollector {
             }
         }
         document.addEventListener('keydown', this._escHandler)
+
+        // Start sync status polling
+        syncStatus.startPolling()
+    }
+
+    // ── Sync status UI ───────────────────────────────────────
+    _updateSyncUI(status) {
+        const dot = this.container.querySelector('#sync-dot')
+        const label = this.container.querySelector('#sync-label')
+        const btn = this.container.querySelector('#sync-status-btn')
+        if (!dot || !label || !btn) return
+
+        dot.className = 'sync-dot'
+        switch (status) {
+            case 'synced':
+                dot.classList.add('sync-ok')
+                label.textContent = 'Synced'
+                btn.title = 'Connected and in sync — click to re-check'
+                break
+            case 'checking':
+                dot.classList.add('sync-checking')
+                label.textContent = 'Checking...'
+                btn.title = 'Checking connection...'
+                break
+            case 'offline':
+                dot.classList.add('sync-offline')
+                label.textContent = 'Offline'
+                btn.title = 'Cannot reach server — click to retry'
+                break
+            case 'expired':
+                dot.classList.add('sync-expired')
+                label.textContent = 'Session expired'
+                btn.title = 'Session expired — please log in again'
+                break
+        }
     }
 
     // ── Theme ─────────────────────────────────────────────────
@@ -271,6 +306,10 @@ export class ThoughtCollector {
                         <button class="header-icon-btn" id="daily-note-btn" title="Daily note (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+D)">&#9782;</button>
                         <button class="header-icon-btn" id="graph-view-btn" title="Graph view (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+G)">&#9672;</button>
                         <button class="header-icon-btn" id="cmd-palette-btn" title="Command palette (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+P)">&#8984;</button>
+                        <button class="sync-status-btn" id="sync-status-btn" title="Sync status">
+                            <span class="sync-dot" id="sync-dot"></span>
+                            <span class="sync-label" id="sync-label">Checking...</span>
+                        </button>
                         <div class="theme-picker" id="theme-picker">
                             <button class="theme-toggle-btn" id="theme-toggle-btn" title="Change theme">
                                 <span class="theme-toggle-swatch" data-theme="${currentTheme}"></span>
@@ -391,10 +430,20 @@ export class ThoughtCollector {
     }
 
     _bindShell() {
+        // Sync status indicator
+        this._updateSyncUI(syncStatus.get())
+        if (this._syncUnsub) this._syncUnsub()
+        this._syncUnsub = syncStatus.onChange(s => this._updateSyncUI(s))
+
+        const syncBtn = this.container.querySelector('#sync-status-btn')
+        if (syncBtn) syncBtn.addEventListener('click', () => syncStatus.check())
+
         // Logout
         this.container.querySelector('#logout-btn').addEventListener('click', async () => {
             document.removeEventListener('keydown', this._escHandler)
             document.removeEventListener('keydown', this._globalKeyHandler)
+            syncStatus.stopPolling()
+            if (this._syncUnsub) this._syncUnsub()
             await auth.logout()
             this.onLogout()
         })

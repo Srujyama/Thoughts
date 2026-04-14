@@ -3455,6 +3455,68 @@ body {
     background: rgba(128, 128, 128, 0.06);
 }
 
+/* ── Sync status indicator ──────────────────────────────────── */
+.sync-status-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: transparent;
+    border: 1px solid var(--t-card-border, var(--nc-red-dim));
+    border-radius: 4px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    flex-shrink: 0;
+    font-family: inherit;
+}
+
+.sync-status-btn:hover {
+    border-color: var(--t-accent, var(--nc-red));
+    background: rgba(128, 128, 128, 0.06);
+}
+
+.sync-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--nc-text-dim);
+    flex-shrink: 0;
+    transition: background 0.3s;
+}
+
+.sync-dot.sync-ok {
+    background: #22c55e;
+    box-shadow: 0 0 6px #22c55e88;
+}
+
+.sync-dot.sync-checking {
+    background: #eab308;
+    animation: sync-pulse 1s ease-in-out infinite;
+}
+
+.sync-dot.sync-offline {
+    background: #ef4444;
+    box-shadow: 0 0 6px #ef444488;
+}
+
+.sync-dot.sync-expired {
+    background: #f97316;
+    box-shadow: 0 0 6px #f9731688;
+}
+
+@keyframes sync-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+.sync-label {
+    font-size: 0.7rem;
+    color: var(--nc-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+}
+
 /* ── Command Palette / Quick Switcher ──────────────────────── */
 .command-palette-overlay {
     align-items: flex-start;
@@ -4040,6 +4102,14 @@ body {
         width: 26px;
         height: 26px;
         font-size: 0.85rem;
+    }
+
+    .sync-label {
+        display: none;
+    }
+
+    .sync-status-btn {
+        padding: 4px 6px;
     }
 
     .command-palette {

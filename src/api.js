@@ -629,3 +629,83 @@ export const filesAPI = {
         return file
     },
 }
+
+// ── Sync status ──────────────────────────────────────────────
+// Tracks whether the app can reach the backend and the session is valid.
+// States: 'synced' | 'checking' | 'offline' | 'expired'
+
+let _syncStatus = 'checking'
+let _syncListeners = []
+let _syncCheckTimer = null
+
+export const syncStatus = {
+    get() { return _syncStatus },
+
+    onChange(fn) {
+        _syncListeners.push(fn)
+        return () => { _syncListeners = _syncListeners.filter(l => l !== fn) }
+    },
+
+    _set(status) {
+        if (_syncStatus === status) return
+        _syncStatus = status
+        _syncListeners.forEach(fn => fn(status))
+    },
+
+    async check() {
+        const token = localStorage.getItem(TOKEN_KEY)
+        if (!token) { syncStatus._set('expired'); return }
+
+        // Check if token is expired locally first
+        const exp = _parseJwtExp(token)
+        const nowSec = Math.floor(Date.now() / 1000)
+        if (exp && exp < nowSec) {
+            // Try refreshing
+            try {
+                if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
+                await _refreshPromise
+            } catch {
+                syncStatus._set('expired')
+                return
+            }
+        }
+
+        syncStatus._set('checking')
+        try {
+            const res = await fetch(`${BASE_URL}/vault/files`, {
+                headers: { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}` },
+            })
+            if (res.ok) syncStatus._set('synced')
+            else if (res.status === 401) syncStatus._set('expired')
+            else syncStatus._set('offline')
+        } catch {
+            syncStatus._set('offline')
+        }
+    },
+
+    startPolling() {
+        syncStatus.check()
+        if (_syncCheckTimer) clearInterval(_syncCheckTimer)
+        _syncCheckTimer = setInterval(() => syncStatus.check(), 60_000)
+    },
+
+    stopPolling() {
+        if (_syncCheckTimer) { clearInterval(_syncCheckTimer); _syncCheckTimer = null }
+    },
+}
+
+// Update sync status on successful/failed API calls
+const _origApiFetch = apiFetch
+// We patch the internal flow by hooking into listFromCloud success/failure
+const _origListFromCloud = foldersAPI.listFromCloud.bind(foldersAPI)
+foldersAPI.listFromCloud = async function () {
+    try {
+        const result = await _origListFromCloud()
+        syncStatus._set('synced')
+        return result
+    } catch (err) {
+        if (err.message === '__SESSION_EXPIRED__') syncStatus._set('expired')
+        else syncStatus._set('offline')
+        throw err
+    }
+}
