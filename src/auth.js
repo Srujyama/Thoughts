@@ -13,7 +13,7 @@ export class AuthController {
             <div class="auth-panel">
                 <div class="auth-logo">
                     <h1 class="app-title" data-text="Thoughts">Thoughts</h1>
-                    <p class="auth-subtitle">Your personal writing space</p>
+                    <p class="auth-subtitle">an obsidian replacement</p>
                 </div>
 
                 <form class="auth-form" id="auth-form">
@@ -53,6 +53,16 @@ export class AuthController {
                         <button type="button" class="link-btn" id="toggle-mode">Create account</button>
                     </p>
                 </form>
+
+                <div class="auth-meta">
+                    <span>Srujan Yamali</span>
+                    <span>&middot;</span>
+                    <span>Berkeley, CA</span>
+                    <span>&middot;</span>
+                    <span>2026</span>
+                </div>
+
+                <a href="#/docs" class="auth-docs-link">docs</a>
 
                 <div class="scanlines"></div>
             </div>
