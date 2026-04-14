@@ -44,7 +44,13 @@
       "Bash(git push)",
       "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts add src/app.js)",
       "Bash(git -C /Users/srujanyamali/WebstormProjects/thoughts commit -m \"Silence SYNC ERROR on cold start — retry once after 5s\")",
-      "Bash(npx vite:*)"
+      "Bash(npx vite:*)",
+      "Bash(gh repo:*)",
+      "Bash(gh api:*)",
+      "Bash(git stash:*)",
+      "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git push:*)"
     ]
   }
 }

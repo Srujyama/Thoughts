@@ -783,6 +783,9 @@ export class ThoughtCollector {
         const allFiles = this._collectFolderFiles(id)
         const total = allFiles.length
 
+        const isViewingDeleted = (this.view === 'files' || this.view === 'editor') &&
+            this.currentFolder && (this.currentFolder.id === id || this._isDescendantOf(this.currentFolder.id, id))
+
         if (total > 0) {
             this._showProgressToast('Deleting', total)
             foldersAPI.deleteWithProgress(id, (done, t) => {
@@ -790,7 +793,12 @@ export class ThoughtCollector {
             })
                 .then(() => {
                     this._hideProgressToast()
-                    this._render()
+                    if (isViewingDeleted) {
+                        this.editorDirty = false
+                        this._navigate('folders')
+                    } else {
+                        this._render()
+                    }
                 })
                 .catch(err => {
                     this._hideProgressToast()
@@ -798,9 +806,23 @@ export class ThoughtCollector {
                 })
         } else {
             foldersAPI.delete(id)
-                .then(() => { this._render() })
+                .then(() => {
+                    if (isViewingDeleted) {
+                        this.editorDirty = false
+                        this._navigate('folders')
+                    } else {
+                        this._render()
+                    }
+                })
                 .catch(err => this._toast(`Delete error: ${err.message}`))
         }
+    }
+
+    _isDescendantOf(folderId, ancestorId) {
+        const folder = foldersAPI.list().find(f => f.id === folderId)
+        if (!folder || !folder.parentId) return false
+        if (folder.parentId === ancestorId) return true
+        return this._isDescendantOf(folder.parentId, ancestorId)
     }
 
     _collectFolderFiles(folderId) {
@@ -1404,7 +1426,12 @@ export class ThoughtCollector {
         filesAPI.delete(this.currentFolder.id, fileId)
             .then(() => {
                 this.currentFolder = foldersAPI.list().find((f) => f.id === this.currentFolder.id)
-                if (this.view === 'files') this._render()
+                if (this.view === 'editor' && this.currentFile && this.currentFile.id === fileId) {
+                    this.editorDirty = false
+                    this._navigate('files')
+                } else {
+                    this._render()
+                }
             })
             .catch(err => this._toast(`Delete error: ${err.message}`))
     }
@@ -1424,8 +1451,8 @@ export class ThoughtCollector {
             // Still refresh from cloud in background for freshness
             filesAPI.loadContent(this.currentFolder.id, file.id)
                 .then(loaded => {
-                    // Only update if content actually changed
-                    if (loaded.content !== this.currentFile.content && this.view === 'editor') {
+                    // Only update if content actually changed and we're still viewing the same file
+                    if (loaded.content !== this.currentFile.content && this.view === 'editor' && this.currentFile.id === file.id) {
                         this.currentFile = loaded
                         const contentArea = this.container.querySelector('#file-content')
                         const preview = this.container.querySelector('#editor-preview')
@@ -1442,8 +1469,10 @@ export class ThoughtCollector {
 
             filesAPI.loadContent(this.currentFolder.id, file.id)
                 .then(loaded => {
-                    this.currentFile = loaded
-                    if (this.view === 'editor') this._renderEditor()
+                    if (this.view === 'editor' && this.currentFile.id === file.id) {
+                        this.currentFile = loaded
+                        this._renderEditor()
+                    }
                 })
                 .catch(err => this._toast(`Load error: ${err.message}`))
         }
