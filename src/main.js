@@ -55,7 +55,18 @@ function showDocs() {
                         <li>10+ themes</li>
                         <li>daily notes</li>
                         <li>cloud sync</li>
+                        <li>obsidian vault import</li>
                     </ul>
+                </section>
+                <section>
+                    <h2>obsidian sync</h2>
+                    <p>import your entire obsidian vault in one click. hit "Import vault" on the folders page or open the command palette (<code>Ctrl/Cmd + P</code>) and run "Import Obsidian Vault". pick your vault folder and all your .md files come in, folder structure intact. <code>.obsidian</code> config is skipped automatically.</p>
+                    <p style="margin-top: 0.6rem;">for live two-way sync, use the CLI tool:</p>
+                    <div class="docs-code">
+                        <code>pip install watchdog requests</code>
+                        <code>python vault_sync.py --vault ~/my-vault --token YOUR_JWT</code>
+                    </div>
+                    <p style="margin-top: 0.4rem;">this watches your local vault for changes and syncs both ways every 30 seconds.</p>
                 </section>
                 <section>
                     <h2>keys</h2>

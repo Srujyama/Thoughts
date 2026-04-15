@@ -4268,6 +4268,33 @@ body {
     min-width: 120px;
 }
 
+.docs-body code {
+    font-family: var(--t-font-editor, monospace);
+    font-size: 0.65rem;
+    background: var(--nc-bg-mid, #12121e);
+    padding: 0.1rem 0.35rem;
+    border-radius: 2px;
+}
+
+.docs-code {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+    padding: 0.6rem 0.8rem;
+    background: var(--nc-bg-mid, #12121e);
+    border: 1px solid var(--t-card-border, rgba(0,245,255,0.12));
+    border-radius: 3px;
+}
+
+.docs-code code {
+    display: block;
+    background: none;
+    padding: 0;
+    font-size: 0.6rem;
+    color: var(--nc-text-dim, #4a5568);
+}
+
 .docs-footer-section p {
     font-size: 0.55rem;
     letter-spacing: 0.12em;

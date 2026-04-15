@@ -718,8 +718,8 @@ export class ThoughtCollector {
             <div class="toolbar">
                 <span class="section-label">Folders</span>
                 <div class="toolbar-actions">
-                    <button class="cyber-btn compact-btn" id="upload-root-folder-btn" title="Upload folder(s) of .md files to root">
-                        <span class="btn-text">Upload folder</span>
+                    <button class="cyber-btn compact-btn" id="upload-root-folder-btn" title="Import an Obsidian vault or folder of .md files">
+                        <span class="btn-text">Import vault</span>
                         <span class="btn-glow"></span>
                     </button>
                     <input type="file" id="root-folder-file-input" webkitdirectory multiple style="display:none">
@@ -1186,6 +1186,15 @@ export class ThoughtCollector {
     }
 
     // ── Root folder upload (multiple folders → root level) ────────
+    _triggerVaultImport() {
+        const input = document.createElement('input')
+        input.type = 'file'
+        input.webkitdirectory = true
+        input.multiple = true
+        input.addEventListener('change', () => this._handleRootFolderUpload(input))
+        input.click()
+    }
+
     async _handleRootFolderUpload(input) {
         const allFiles = Array.from(input.files || [])
         const mdFiles = allFiles.filter(f => f.name.endsWith('.md'))
@@ -1196,7 +1205,7 @@ export class ThoughtCollector {
         }
 
         const total = mdFiles.length
-        this._showProgressToast('Uploading', total)
+        this._showProgressToast('Importing', total)
         let succeeded = 0
         let errors = 0
 
@@ -1209,13 +1218,18 @@ export class ThoughtCollector {
                 const folderParts = parts.slice(0, -1)  // all segments except filename
                 const fileName = parts[parts.length - 1]
 
+                // Skip Obsidian config files
+                if (folderParts.some(seg => seg === '.obsidian' || seg === '.trash')) {
+                    this._updateProgressToast('Importing', i + 1, total)
+                    continue
+                }
+
                 // Build/find folder hierarchy starting at root (parentId = null)
                 let targetFolder = null
                 let parentId = null
 
                 for (const seg of folderParts) {
                     if (!seg) continue
-                    const meta_folders = foldersAPI.list()
                     let existing = parentId
                         ? foldersAPI.listChildren(parentId).find(c =>
                             c.name.toLowerCase() === seg.toLowerCase() ||
@@ -1233,7 +1247,7 @@ export class ThoughtCollector {
 
                 if (!targetFolder) {
                     errors++
-                    this._updateProgressToast('Uploading', i + 1, total)
+                    this._updateProgressToast('Importing', i + 1, total)
                     continue
                 }
 
@@ -1241,20 +1255,20 @@ export class ThoughtCollector {
                 const title = fileName.replace(/\.md$/i, '').replace(/-/g, ' ')
                 await filesAPI.create(targetFolder.id, title, content)
                 succeeded++
-                this._updateProgressToast('Uploading', i + 1, total)
+                this._updateProgressToast('Importing', i + 1, total)
             } catch (err) {
                 errors++
                 this._toast(`Error: ${f.name}: ${err.message}`)
-                this._updateProgressToast('Uploading', i + 1, total)
+                this._updateProgressToast('Importing', i + 1, total)
             }
         }
 
         this._hideProgressToast()
         if (succeeded) {
-            this._toast(`Uploaded ${succeeded} file${succeeded > 1 ? 's' : ''}${errors ? `, ${errors} failed` : ''}`)
+            this._toast(`Imported ${succeeded} file${succeeded > 1 ? 's' : ''}${errors ? `, ${errors} failed` : ''}`)
             this._render()
         } else if (errors) {
-            this._toast(`Upload failed: ${errors} error${errors > 1 ? 's' : ''}`)
+            this._toast(`Import failed: ${errors} error${errors > 1 ? 's' : ''}`)
         }
         if (input.value !== undefined) input.value = ''
     }
@@ -2839,6 +2853,7 @@ export class ThoughtCollector {
             { name: 'Graph View: Show connections', key: `${mod}+G`, action: () => this._showGraphView() },
             { name: 'New File', action: () => { if (this.currentFolder) this._promptNewFile(); else this._toast('Open a folder first') } },
             { name: 'New Folder', action: () => this._promptNewFolder(null) },
+            { name: 'Import Obsidian Vault', action: () => this._triggerVaultImport() },
             { name: 'Toggle Focus Mode', action: () => { const z = this.container.querySelector('#editor-zone'); if (z) this._toggleFocusMode(z) } },
             { name: 'Export as PDF', action: () => { const p = this.container.querySelector('#editor-preview'); const t = this.container.querySelector('#file-title'); if (p && t) this._exportPDF(t.value, p) } },
             { name: 'Toggle Autosave', action: () => { this.autosave = !this.autosave; localStorage.setItem(AUTOSAVE_KEY, this.autosave); this._toast(`Autosave ${this.autosave ? 'on' : 'off'}`) } },
