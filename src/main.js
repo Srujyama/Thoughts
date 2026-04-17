@@ -53,7 +53,6 @@ function showDocs() {
                         <li>graph view</li>
                         <li>command palette</li>
                         <li>10+ themes</li>
-                        <li>daily notes</li>
                         <li>cloud sync</li>
                         <li>obsidian vault import</li>
                     </ul>
@@ -77,7 +76,6 @@ function showDocs() {
                         <div><kbd>Ctrl/Cmd + E</kbd> toggle edit/preview</div>
                         <div><kbd>Ctrl/Cmd + B</kbd> bold</div>
                         <div><kbd>Ctrl/Cmd + I</kbd> italic</div>
-                        <div><kbd>Ctrl/Cmd + D</kbd> daily note</div>
                     </div>
                 </section>
                 <section class="docs-footer-section">

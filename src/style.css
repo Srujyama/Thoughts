@@ -3431,7 +3431,7 @@ body {
    OBSIDIAN FEATURES — NEW STYLES
    ══════════════════════════════════════════════════════════════ */
 
-/* ── Header icon buttons (daily note, graph, command palette) ── */
+/* ── Header icon buttons (graph, command palette) ── */
 .header-icon-btn {
     display: flex;
     align-items: center;
@@ -4365,4 +4365,154 @@ body {
     font-size: 0.55rem;
     letter-spacing: 0.12em;
     opacity: 0.35;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   SIDEBAR FOOTER + SETTINGS
+   ══════════════════════════════════════════════════════════════ */
+
+.sidebar-footer {
+    margin-top: auto;
+    padding: 0.5rem 0.75rem 0.25rem;
+    border-top: 1px solid var(--t-divider-color, var(--nc-red-dim));
+    position: sticky;
+    bottom: 0;
+    background: var(--t-header-bg, var(--nc-bg-dark));
+}
+
+.sidebar-settings-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.5rem;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: var(--nc-text-dim);
+    font-family: var(--t-font-ui);
+    font-size: 0.75rem;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.sidebar-settings-btn:hover {
+    color: var(--t-accent, var(--nc-red));
+    border-color: var(--t-accent, var(--nc-red));
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.sidebar-settings-icon {
+    font-size: 0.95rem;
+    line-height: 1;
+}
+
+.sidebar-settings-label {
+    flex: 1;
+}
+
+/* ── Settings panel (modal) ───────────────────────────────── */
+.settings-panel {
+    min-width: 420px;
+    max-width: 540px;
+}
+
+.settings-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin: 0.5rem 0 1rem;
+}
+
+.settings-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.settings-row.settings-subrow {
+    padding-left: 0.75rem;
+    border-left: 2px solid var(--t-divider-color, var(--nc-red-dim));
+}
+
+.settings-label {
+    font-size: 0.78rem;
+    color: var(--nc-text);
+    letter-spacing: 0.05em;
+    font-family: var(--t-font-ui);
+    flex: 1;
+}
+
+.settings-select,
+.settings-input {
+    background: var(--nc-bg-void, #000);
+    color: var(--nc-text);
+    border: 1px solid var(--t-card-border, var(--nc-red-dim));
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.78rem;
+    font-family: var(--t-font-ui);
+    min-width: 140px;
+}
+
+.settings-input {
+    width: 90px;
+    min-width: 0;
+    text-align: right;
+}
+
+.settings-divider {
+    height: 1px;
+    background: var(--t-divider-color, var(--nc-red-dim));
+    opacity: 0.5;
+    margin: 0.25rem 0;
+}
+
+.settings-toggle {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 20px;
+    flex-shrink: 0;
+}
+
+.settings-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.settings-toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--nc-bg-dark, #111);
+    border: 1px solid var(--t-card-border, var(--nc-red-dim));
+    border-radius: 20px;
+    transition: 0.2s;
+}
+
+.settings-toggle-slider::before {
+    content: "";
+    position: absolute;
+    height: 14px;
+    width: 14px;
+    left: 2px;
+    top: 2px;
+    background: var(--nc-text-dim);
+    border-radius: 50%;
+    transition: 0.2s;
+}
+
+.settings-toggle input:checked + .settings-toggle-slider {
+    background: var(--t-accent, var(--nc-red));
+    border-color: var(--t-accent, var(--nc-red));
+}
+
+.settings-toggle input:checked + .settings-toggle-slider::before {
+    transform: translateX(20px);
+    background: var(--nc-bg-void, #000);
 }

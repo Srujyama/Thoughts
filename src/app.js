@@ -1,13 +1,14 @@
 // src/app.js
 import { foldersAPI, filesAPI, auth, vaultAPI, syncStatus } from './api.js'
 
-const EDITOR_MODE_KEY  = 'nc_editor_mode'
-const THEME_KEY        = 'nc_theme'
-const AUTOSAVE_KEY     = 'nc_autosave'
-const SIDEBAR_OPEN_KEY = 'nc_sidebar_open'
-const STARRED_KEY      = 'nc_starred'
-const RECENT_KEY       = 'nc_recent'
-const DAILY_FOLDER     = 'daily-notes'
+const EDITOR_MODE_KEY     = 'nc_editor_mode'
+const THEME_KEY           = 'nc_theme'
+const AUTOSAVE_KEY        = 'nc_autosave'
+const SIDEBAR_OPEN_KEY    = 'nc_sidebar_open'
+const STARRED_KEY         = 'nc_starred'
+const RECENT_KEY          = 'nc_recent'
+const AUTOLOGOUT_KEY      = 'nc_autologout'
+const AUTOLOGOUT_MIN_KEY  = 'nc_autologout_minutes'
 
 const THEMES = [
     { id: 'system',     label: 'System' },
@@ -66,6 +67,12 @@ export class ThoughtCollector {
             : (localStorage.getItem(EDITOR_MODE_KEY) || 'split')
         this.autosave = localStorage.getItem(AUTOSAVE_KEY) === 'true'
         this._autosaveTimer = null
+        // Autologout: off by default; interval stored in minutes
+        this.autologout = localStorage.getItem(AUTOLOGOUT_KEY) === 'true'
+        const storedMins = parseInt(localStorage.getItem(AUTOLOGOUT_MIN_KEY), 10)
+        this.autologoutMinutes = Number.isFinite(storedMins) && storedMins > 0 ? storedMins : 15
+        this._autologoutTimer = null
+        this._autologoutActivityHandler = null
         // Track which sidebar folders are collapsed (set of folder ids)
         this._collapsedFolders = new Set(JSON.parse(localStorage.getItem(SIDEBAR_OPEN_KEY) || '[]'))
         // Starred (favorited) file ids
@@ -96,12 +103,6 @@ export class ThoughtCollector {
             if (e.key === 'o' && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault()
                 this._showQuickSwitcher()
-                return
-            }
-            // Daily note: Ctrl/Cmd+D (when not in textarea)
-            if (e.key === 'd' && (e.metaKey || e.ctrlKey) && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
-                e.preventDefault()
-                this._openDailyNote()
                 return
             }
             // Graph view: Ctrl/Cmd+G (when not in textarea)
@@ -139,6 +140,54 @@ export class ThoughtCollector {
 
         // Start sync status polling
         syncStatus.startPolling()
+
+        // Apply autologout setting
+        this._applyAutologout()
+    }
+
+    // ── Autologout (inactivity-based) ─────────────────────────
+    _applyAutologout() {
+        this._clearAutologoutTimer()
+        if (this._autologoutActivityHandler) {
+            const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll']
+            events.forEach(ev => document.removeEventListener(ev, this._autologoutActivityHandler, true))
+            this._autologoutActivityHandler = null
+        }
+        if (!this.autologout) return
+
+        const resetTimer = () => {
+            this._clearAutologoutTimer()
+            const ms = Math.max(1, this.autologoutMinutes) * 60 * 1000
+            this._autologoutTimer = setTimeout(() => this._triggerAutologout(), ms)
+        }
+
+        this._autologoutActivityHandler = resetTimer
+        const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll']
+        events.forEach(ev => document.addEventListener(ev, this._autologoutActivityHandler, true))
+        resetTimer()
+    }
+
+    _clearAutologoutTimer() {
+        if (this._autologoutTimer) {
+            clearTimeout(this._autologoutTimer)
+            this._autologoutTimer = null
+        }
+    }
+
+    async _triggerAutologout() {
+        this._clearAutologoutTimer()
+        if (this._autologoutActivityHandler) {
+            const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll']
+            events.forEach(ev => document.removeEventListener(ev, this._autologoutActivityHandler, true))
+            this._autologoutActivityHandler = null
+        }
+        document.removeEventListener('keydown', this._escHandler)
+        document.removeEventListener('keydown', this._globalKeyHandler)
+        syncStatus.stopPolling()
+        if (this._syncUnsub) this._syncUnsub()
+        try { await auth.logout() } catch (e) { /* ignore */ }
+        this._toast('Logged out due to inactivity')
+        this.onLogout()
     }
 
     // ── Sync status UI ───────────────────────────────────────
@@ -290,6 +339,12 @@ export class ThoughtCollector {
                     <button class="sidebar-new-btn" id="sidebar-new-folder" title="New folder">+</button>
                 </div>
                 <div class="sidebar-list">${sidebarHtml || '<p class="sidebar-empty">No folders yet</p>'}</div>
+                <div class="sidebar-footer">
+                    <button class="sidebar-settings-btn" id="sidebar-settings-btn" title="Settings">
+                        <span class="sidebar-settings-icon">&#9881;</span>
+                        <span class="sidebar-settings-label">Settings</span>
+                    </button>
+                </div>
             </nav>
         ` : ''
 
@@ -303,7 +358,6 @@ export class ThoughtCollector {
                         <nav class="breadcrumb" id="breadcrumb">${this._buildBreadcrumb()}</nav>
                     </div>
                     <div class="header-right">
-                        <button class="header-icon-btn" id="daily-note-btn" title="Daily note (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+D)">&#9782;</button>
                         <button class="header-icon-btn" id="graph-view-btn" title="Graph view (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+G)">&#9672;</button>
                         <button class="header-icon-btn" id="cmd-palette-btn" title="Command palette (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+P)">&#8984;</button>
                         <button class="sync-status-btn" id="sync-status-btn" title="Sync status">
@@ -444,6 +498,12 @@ export class ThoughtCollector {
             document.removeEventListener('keydown', this._globalKeyHandler)
             syncStatus.stopPolling()
             if (this._syncUnsub) this._syncUnsub()
+            this._clearAutologoutTimer()
+            if (this._autologoutActivityHandler) {
+                const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll']
+                events.forEach(ev => document.removeEventListener(ev, this._autologoutActivityHandler, true))
+                this._autologoutActivityHandler = null
+            }
             await auth.logout()
             this.onLogout()
         })
@@ -554,9 +614,7 @@ export class ThoughtCollector {
             })
         })
 
-        // Header action buttons (daily note, graph view, command palette)
-        const dailyNoteBtn = this.container.querySelector('#daily-note-btn')
-        if (dailyNoteBtn) dailyNoteBtn.addEventListener('click', () => this._openDailyNote())
+        // Header action buttons (graph view, command palette)
         const graphViewBtn = this.container.querySelector('#graph-view-btn')
         if (graphViewBtn) graphViewBtn.addEventListener('click', () => this._showGraphView())
         const cmdPaletteBtn = this.container.querySelector('#cmd-palette-btn')
@@ -566,6 +624,12 @@ export class ThoughtCollector {
         const sidebarNewBtn = this.container.querySelector('#sidebar-new-folder')
         if (sidebarNewBtn) {
             sidebarNewBtn.addEventListener('click', () => this._promptNewFolder(null))
+        }
+
+        // Sidebar settings button
+        const sidebarSettingsBtn = this.container.querySelector('#sidebar-settings-btn')
+        if (sidebarSettingsBtn) {
+            sidebarSettingsBtn.addEventListener('click', () => this._showSettingsPanel())
         }
 
         // Sidebar drag-and-drop (drop folders/files onto sidebar items)
@@ -2189,7 +2253,6 @@ export class ThoughtCollector {
             { keys: `${mod}+S`, desc: 'Save' },
             { keys: `${mod}+P`, desc: 'Command palette' },
             { keys: `${mod}+O`, desc: 'Quick switcher' },
-            { keys: `${mod}+D`, desc: 'Daily note' },
             { keys: `${mod}+G`, desc: 'Graph view' },
             { keys: `${mod}+B`, desc: 'Bold' },
             { keys: `${mod}+I`, desc: 'Italic' },
@@ -2230,6 +2293,114 @@ export class ThoughtCollector {
             </div>
         `
         document.body.appendChild(overlay)
+        const close = () => overlay.remove()
+        overlay.querySelector('.modal-confirm').addEventListener('click', close)
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
+        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close() })
+        overlay.setAttribute('tabindex', '-1')
+        overlay.focus()
+    }
+
+    // ── Settings Panel ────────────────────────────────────────
+    _showSettingsPanel() {
+        const currentTheme = localStorage.getItem(THEME_KEY) || 'system'
+        const themeOpts = THEMES.map(t =>
+            `<option value="${t.id}" ${t.id === currentTheme ? 'selected' : ''}>${t.label}</option>`
+        ).join('')
+
+        const editorModeOpts = [
+            { id: 'edit',    label: 'Edit only' },
+            { id: 'split',   label: 'Split (edit + preview)' },
+            { id: 'preview', label: 'Preview only' },
+        ].map(o =>
+            `<option value="${o.id}" ${o.id === this.editorMode ? 'selected' : ''}>${o.label}</option>`
+        ).join('')
+
+        const overlay = document.createElement('div')
+        overlay.className = 'modal-overlay'
+        overlay.innerHTML = `
+            <div class="modal-box settings-panel">
+                <div class="modal-title">SETTINGS</div>
+                <div class="settings-list">
+                    <div class="settings-row">
+                        <label class="settings-label" for="settings-theme">Theme</label>
+                        <select class="settings-select" id="settings-theme">${themeOpts}</select>
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label" for="settings-editor-mode">Editor mode</label>
+                        <select class="settings-select" id="settings-editor-mode">${editorModeOpts}</select>
+                    </div>
+                    <div class="settings-row">
+                        <label class="settings-label" for="settings-autosave">Autosave</label>
+                        <label class="settings-toggle">
+                            <input type="checkbox" id="settings-autosave" ${this.autosave ? 'checked' : ''} />
+                            <span class="settings-toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-divider"></div>
+                    <div class="settings-row">
+                        <label class="settings-label" for="settings-autologout">Auto-logout on inactivity</label>
+                        <label class="settings-toggle">
+                            <input type="checkbox" id="settings-autologout" ${this.autologout ? 'checked' : ''} />
+                            <span class="settings-toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="settings-row settings-subrow" id="settings-autologout-interval-row" style="${this.autologout ? '' : 'display:none;'}">
+                        <label class="settings-label" for="settings-autologout-minutes">Inactivity interval (minutes)</label>
+                        <input type="number" min="1" max="1440" step="1" class="settings-input" id="settings-autologout-minutes" value="${this.autologoutMinutes}" />
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button class="modal-btn modal-confirm">CLOSE</button>
+                </div>
+            </div>
+        `
+        document.body.appendChild(overlay)
+
+        const themeSel = overlay.querySelector('#settings-theme')
+        const editorSel = overlay.querySelector('#settings-editor-mode')
+        const autosaveChk = overlay.querySelector('#settings-autosave')
+        const autologoutChk = overlay.querySelector('#settings-autologout')
+        const intervalRow = overlay.querySelector('#settings-autologout-interval-row')
+        const intervalInput = overlay.querySelector('#settings-autologout-minutes')
+
+        themeSel.addEventListener('change', () => {
+            this._applyTheme(themeSel.value)
+            this._render()
+        })
+
+        editorSel.addEventListener('change', () => {
+            const mode = editorSel.value
+            const editorZone = this.container.querySelector('#editor-zone')
+            this._setEditorMode(mode, editorZone)
+        })
+
+        autosaveChk.addEventListener('change', () => {
+            this.autosave = autosaveChk.checked
+            localStorage.setItem(AUTOSAVE_KEY, this.autosave)
+            this._toast(`Autosave ${this.autosave ? 'on' : 'off'}`)
+        })
+
+        autologoutChk.addEventListener('change', () => {
+            this.autologout = autologoutChk.checked
+            localStorage.setItem(AUTOLOGOUT_KEY, this.autologout)
+            intervalRow.style.display = this.autologout ? '' : 'none'
+            this._applyAutologout()
+            this._toast(`Auto-logout ${this.autologout ? `on (${this.autologoutMinutes} min)` : 'off'}`)
+        })
+
+        intervalInput.addEventListener('change', () => {
+            const mins = parseInt(intervalInput.value, 10)
+            if (!Number.isFinite(mins) || mins < 1) {
+                intervalInput.value = this.autologoutMinutes
+                return
+            }
+            this.autologoutMinutes = Math.min(mins, 1440)
+            intervalInput.value = this.autologoutMinutes
+            localStorage.setItem(AUTOLOGOUT_MIN_KEY, this.autologoutMinutes)
+            if (this.autologout) this._applyAutologout()
+        })
+
         const close = () => overlay.remove()
         overlay.querySelector('.modal-confirm').addEventListener('click', close)
         overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
@@ -2849,8 +3020,8 @@ export class ThoughtCollector {
         const mod = isMac ? 'Cmd' : 'Ctrl'
         const commands = [
             { name: 'Quick Switcher: Open file...', key: `${mod}+O`, action: () => this._showQuickSwitcher() },
-            { name: 'Daily Note: Open today\'s note', key: `${mod}+D`, action: () => this._openDailyNote() },
             { name: 'Graph View: Show connections', key: `${mod}+G`, action: () => this._showGraphView() },
+            { name: 'Settings', action: () => this._showSettingsPanel() },
             { name: 'New File', action: () => { if (this.currentFolder) this._promptNewFile(); else this._toast('Open a folder first') } },
             { name: 'New Folder', action: () => this._promptNewFolder(null) },
             { name: 'Import Obsidian Vault', action: () => this._triggerVaultImport() },
@@ -2993,44 +3164,6 @@ export class ThoughtCollector {
             if (e.key === 'Enter') { close(); if (filteredFiles[selectedIdx]) openFile(filteredFiles[selectedIdx]) }
         })
         input.focus()
-    }
-
-    // ── Daily Note ──────────────────────────────────────────────
-    async _openDailyNote() {
-        const today = new Date()
-        const dateStr = today.toISOString().split('T')[0] // YYYY-MM-DD
-        const title = dateStr
-
-        // Find or create daily-notes folder
-        let dailyFolder = foldersAPI.listRoots().find(f => f.path === DAILY_FOLDER || f.name.toLowerCase() === 'daily notes')
-        if (!dailyFolder) {
-            try {
-                dailyFolder = await foldersAPI.create('Daily Notes', null)
-            } catch (err) {
-                this._toast(`Error creating daily notes folder: ${err.message}`)
-                return
-            }
-        }
-        dailyFolder = foldersAPI.list().find(f => f.id === dailyFolder.id) || dailyFolder
-
-        // Find existing daily note
-        const existing = dailyFolder.files.find(f => f.title === title || f.title === dateStr)
-        if (existing) {
-            this.currentFolder = dailyFolder
-            this._openFile(existing)
-            return
-        }
-
-        // Create new daily note
-        const dayName = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
-        const content = `# ${dayName}\n\n`
-        try {
-            const file = await filesAPI.create(dailyFolder.id, title, content)
-            this.currentFolder = foldersAPI.list().find(f => f.id === dailyFolder.id) || dailyFolder
-            this._openFile(file)
-        } catch (err) {
-            this._toast(`Error creating daily note: ${err.message}`)
-        }
     }
 
     // ── Graph View ──────────────────────────────────────────────
