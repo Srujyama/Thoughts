@@ -4160,6 +4160,72 @@ body {
     opacity: 0.7;
 }
 
+/* ── Click-to-reveal login prompt ──────────────────────────── */
+.auth-prompt {
+    background: none;
+    border: none;
+    padding: 0.5rem 1rem;
+    margin: 0 auto 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--t-font-ui);
+    font-size: 0.78rem;
+    letter-spacing: 0.28em;
+    text-transform: lowercase;
+    color: var(--nc-text-dim, #4a5568);
+    cursor: pointer;
+    opacity: 0.55;
+    transition: opacity 0.3s, color 0.3s, transform 0.3s, max-height 0.35s;
+    min-height: 1.4rem;
+    max-height: 3rem;
+    overflow: hidden;
+    user-select: none;
+}
+
+.auth-prompt:hover {
+    opacity: 1;
+    color: var(--t-accent, var(--nc-red));
+}
+
+.auth-prompt-text {
+    white-space: pre;
+}
+
+.auth-prompt-caret {
+    display: inline-block;
+    margin-left: 0.15rem;
+    animation: auth-caret-blink 1s steps(2) infinite;
+    opacity: 0.85;
+}
+
+@keyframes auth-caret-blink {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+}
+
+.auth-prompt-gone {
+    opacity: 0;
+    transform: translateY(-6px);
+    max-height: 0;
+    margin: 0;
+    padding: 0;
+    pointer-events: none;
+}
+
+.auth-form-hidden {
+    opacity: 0;
+    transform: translateY(6px);
+    pointer-events: none;
+    max-height: 0;
+    overflow: hidden;
+    margin: 0;
+}
+
+.auth-form {
+    transition: opacity 0.35s ease, transform 0.35s ease;
+}
+
 /* ══════════════════════════════════════════════════════════════
    DOCS PAGE
    ══════════════════════════════════════════════════════════════ */

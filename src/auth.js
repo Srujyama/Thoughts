@@ -7,9 +7,17 @@ export class AuthController {
         this.onAuthSuccess = onAuthSuccess
         this.onShowDocs = onShowDocs
         this._mode = 'login'   // 'login' | 'signup'
+        this._formRevealed = false
+        this._cycleTimer = null
     }
 
     render() {
+        const startRevealed = this._formRevealed
+        const isSignup = this._mode === 'signup'
+        const submitLabel = isSignup ? 'Create account' : 'Sign in'
+        const toggleLabel = isSignup ? 'Have an account?' : 'New user?'
+        const toggleAction = isSignup ? 'Sign in' : 'Create account'
+
         this.container.innerHTML = `
             <div class="auth-panel">
                 <div class="auth-logo">
@@ -17,7 +25,11 @@ export class AuthController {
                     <p class="auth-subtitle">an obsidian replacement</p>
                 </div>
 
-                <form class="auth-form" id="auth-form">
+                <button type="button" class="auth-prompt${startRevealed ? ' auth-prompt-gone' : ''}" id="auth-prompt" aria-label="Sign in">
+                    <span class="auth-prompt-text" id="auth-prompt-text"></span><span class="auth-prompt-caret">_</span>
+                </button>
+
+                <form class="auth-form${startRevealed ? '' : ' auth-form-hidden'}" id="auth-form">
                     <div class="field-group">
                         <label class="field-label">Email</label>
                         <input
@@ -45,13 +57,13 @@ export class AuthController {
                     <div id="auth-error" class="auth-error hidden"></div>
 
                     <button type="submit" class="cyber-btn primary-btn" id="auth-submit">
-                        <span class="btn-text">Sign in</span>
+                        <span class="btn-text">${submitLabel}</span>
                         <span class="btn-glow"></span>
                     </button>
 
                     <p class="auth-toggle">
-                        <span id="toggle-label">New user?</span>
-                        <button type="button" class="link-btn" id="toggle-mode">Create account</button>
+                        <span id="toggle-label">${toggleLabel}</span>
+                        <button type="button" class="link-btn" id="toggle-mode">${toggleAction}</button>
                     </p>
                 </form>
 
@@ -70,10 +82,87 @@ export class AuthController {
         `
 
         this._bindEvents()
-        this.container.querySelector('#auth-email').focus()
+        if (startRevealed) {
+            const emailEl = this.container.querySelector('#auth-email')
+            if (emailEl) emailEl.focus()
+        } else {
+            this._startPromptAnimation()
+        }
+    }
+
+    _startPromptAnimation() {
+        const textEl = this.container.querySelector('#auth-prompt-text')
+        if (!textEl) return
+
+        const phrases = [
+            'click to sign in',
+            'open your thoughts',
+            'enter the void',
+            'click to begin',
+        ]
+        let phraseIdx = 0
+        let charIdx = 0
+        let phase = 'typing' // 'typing' | 'holding' | 'deleting'
+
+        const tick = () => {
+            if (this._formRevealed) return
+            const current = phrases[phraseIdx]
+
+            if (phase === 'typing') {
+                charIdx++
+                textEl.textContent = current.slice(0, charIdx)
+                if (charIdx >= current.length) {
+                    phase = 'holding'
+                    this._cycleTimer = setTimeout(tick, 2200)
+                    return
+                }
+                this._cycleTimer = setTimeout(tick, 70 + Math.random() * 40)
+            } else if (phase === 'holding') {
+                phase = 'deleting'
+                this._cycleTimer = setTimeout(tick, 40)
+            } else {
+                charIdx--
+                textEl.textContent = current.slice(0, charIdx)
+                if (charIdx <= 0) {
+                    phase = 'typing'
+                    phraseIdx = (phraseIdx + 1) % phrases.length
+                    this._cycleTimer = setTimeout(tick, 500)
+                    return
+                }
+                this._cycleTimer = setTimeout(tick, 35)
+            }
+        }
+        tick()
+    }
+
+    _stopPromptAnimation() {
+        if (this._cycleTimer) {
+            clearTimeout(this._cycleTimer)
+            this._cycleTimer = null
+        }
+    }
+
+    _revealForm() {
+        if (this._formRevealed) return
+        this._formRevealed = true
+        this._stopPromptAnimation()
+
+        const prompt = this.container.querySelector('#auth-prompt')
+        const form = this.container.querySelector('#auth-form')
+        if (prompt) prompt.classList.add('auth-prompt-gone')
+        if (form) form.classList.remove('auth-form-hidden')
+
+        setTimeout(() => {
+            const emailEl = this.container.querySelector('#auth-email')
+            if (emailEl) emailEl.focus()
+        }, 280)
     }
 
     _bindEvents() {
+        this.container.querySelector('#auth-prompt').addEventListener('click', () => {
+            this._revealForm()
+        })
+
         this.container.querySelector('#auth-form').addEventListener('submit', (e) => {
             e.preventDefault()
             this._handleSubmit()
