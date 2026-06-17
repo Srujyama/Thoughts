@@ -2252,6 +2252,17 @@ body {
     flex-shrink: 0;
 }
 
+/* Desktop: action cluster is an inline row; overflow (kebab) menu is mobile-only.
+   The @media (max-width: 768px) block flips these — collapsing the desktop
+   cluster and revealing the kebab + its dropdown menu. */
+.header-actions-desktop {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.header-overflow { display: none; }
+
 /* ── Hide cyberpunk effects on non-cyberpunk themes ──────────── */
 [data-theme="white"] .scanlines,
 [data-theme="black"] .scanlines,
@@ -2745,7 +2756,7 @@ body {
 
     /* Header overflow (kebab) menu — collapse the desktop action cluster */
     .header-actions-desktop { display: none; }
-    .header-overflow { position: relative; }
+    .header-overflow { display: block; position: relative; }
     .header-overflow-btn {
         display: flex;
         align-items: center;
