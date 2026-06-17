@@ -1,5 +1,5 @@
 // src/app.js
-import { foldersAPI, filesAPI, auth, vaultAPI, syncStatus } from './api.js'
+import { foldersAPI, filesAPI, auth, vaultAPI, syncStatus, offlineQueue } from './api.js'
 
 const EDITOR_MODE_KEY     = 'nc_editor_mode'
 const THEME_KEY           = 'nc_theme'
@@ -65,7 +65,11 @@ export class ThoughtCollector {
         this.editorMode = this._isMobile()
             ? 'edit'
             : (localStorage.getItem(EDITOR_MODE_KEY) || 'split')
-        this.autosave = localStorage.getItem(AUTOSAVE_KEY) === 'true'
+        // Autosave: default ON for mobile (work is easily lost when backgrounding
+        // Safari), opt-out via explicit 'false'. Desktop stays opt-in.
+        this.autosave = this._isMobile()
+            ? (localStorage.getItem(AUTOSAVE_KEY) !== 'false')
+            : (localStorage.getItem(AUTOSAVE_KEY) === 'true')
         this._autosaveTimer = null
         // Autologout: off by default; interval stored in minutes
         this.autologout = localStorage.getItem(AUTOLOGOUT_KEY) === 'true'
@@ -138,11 +142,44 @@ export class ThoughtCollector {
         }
         document.addEventListener('keydown', this._escHandler)
 
+        // Flush unsaved editor changes when the tab is hidden/closed (iOS uses
+        // pagehide; desktop uses beforeunload to warn). Registered once.
+        this._pagehideHandler = () => {
+            if (this.view === 'editor' && this.editorDirty) this.flushSave()
+        }
+        this._beforeunloadHandler = (e) => {
+            if (this.view === 'editor' && this.editorDirty && !this._saving) {
+                e.preventDefault()
+                e.returnValue = ''
+            }
+        }
+        window.addEventListener('pagehide', this._pagehideHandler)
+        window.addEventListener('beforeunload', this._beforeunloadHandler)
+
         // Start sync status polling
         syncStatus.startPolling()
 
         // Apply autologout setting
         this._applyAutologout()
+    }
+
+    // ── Flush the current editor's content to cloud (or offline queue) ──
+    // Used by pagehide/visibility paths where we can't await a full save.
+    flushSave() {
+        if (this._saving || !this.editorDirty) return
+        if (this.view !== 'editor' || !this.currentFolder || !this.currentFile) return
+        const titleInput  = this.container.querySelector('#file-title')
+        const contentArea = this.container.querySelector('#file-content')
+        if (!contentArea) return
+        const content = contentArea.value
+        const title = titleInput ? titleInput.value : this.currentFile.title
+        // Optimistically clear the dirty flag so we don't double-fire.
+        this.editorDirty = false
+        filesAPI.update(this.currentFolder.id, this.currentFile.id, { title, content })
+            .catch(() => {
+                // Offline / failed — queue the raw write so it replays on reconnect.
+                if (this.currentFile.path) offlineQueue.enqueue(this.currentFile.path, content)
+            })
     }
 
     // ── Autologout (inactivity-based) ─────────────────────────
@@ -174,6 +211,12 @@ export class ThoughtCollector {
         }
     }
 
+    // Remove the window-level lifecycle handlers (called on any logout path)
+    _removeLifecycleHandlers() {
+        if (this._pagehideHandler) window.removeEventListener('pagehide', this._pagehideHandler)
+        if (this._beforeunloadHandler) window.removeEventListener('beforeunload', this._beforeunloadHandler)
+    }
+
     async _triggerAutologout() {
         this._clearAutologoutTimer()
         if (this._autologoutActivityHandler) {
@@ -183,6 +226,7 @@ export class ThoughtCollector {
         }
         document.removeEventListener('keydown', this._escHandler)
         document.removeEventListener('keydown', this._globalKeyHandler)
+        this._removeLifecycleHandlers()
         syncStatus.stopPolling()
         if (this._syncUnsub) this._syncUnsub()
         try { await auth.logout() } catch (e) { /* ignore */ }
@@ -312,6 +356,9 @@ export class ThoughtCollector {
 
     // ── Top-level render dispatcher ───────────────────────────
     _render() {
+        // Tear down any editor-specific viewport listener before re-rendering
+        // so handlers don't stack across views.
+        if (this._vvCleanup) { this._vvCleanup(); this._vvCleanup = null }
         if (this.view === 'folders') this._renderFolders()
         else if (this.view === 'files') this._renderFiles()
         else if (this.view === 'editor') this._renderEditor()
@@ -352,32 +399,49 @@ export class ThoughtCollector {
             <div class="app-shell">
                 <header class="app-header">
                     <div class="header-left">
+                        ${sidebar ? `<button class="mobile-hamburger" id="mobile-menu-btn" title="Menu" aria-label="Open folder menu">
+                            <span></span><span></span><span></span>
+                        </button>` : ''}
+                        <button class="breadcrumb-back-btn" id="breadcrumb-back" title="Back" aria-label="Back">&larr;</button>
                         <button class="app-logo-btn" id="go-home" title="Home">
                             <h1 class="app-title small" data-text="Thoughts">Thoughts</h1>
                         </button>
                         <nav class="breadcrumb" id="breadcrumb">${this._buildBreadcrumb()}</nav>
                     </div>
                     <div class="header-right">
-                        <button class="header-icon-btn" id="graph-view-btn" title="Graph view (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+G)">&#9672;</button>
-                        <button class="header-icon-btn" id="cmd-palette-btn" title="Command palette (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+P)">&#8984;</button>
                         <button class="sync-status-btn" id="sync-status-btn" title="Sync status">
                             <span class="sync-dot" id="sync-dot"></span>
                             <span class="sync-label" id="sync-label">Checking...</span>
                         </button>
-                        <div class="theme-picker" id="theme-picker">
-                            <button class="theme-toggle-btn" id="theme-toggle-btn" title="Change theme">
-                                <span class="theme-toggle-swatch" data-theme="${currentTheme}"></span>
-                                <span class="theme-toggle-label">${currentLabel}</span>
+                        <div class="header-actions-desktop">
+                            <button class="header-icon-btn" id="graph-view-btn" title="Graph view (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+G)">&#9672;</button>
+                            <button class="header-icon-btn" id="cmd-palette-btn" title="Command palette (${navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl'}+P)">&#8984;</button>
+                            <div class="theme-picker" id="theme-picker">
+                                <button class="theme-toggle-btn" id="theme-toggle-btn" title="Change theme">
+                                    <span class="theme-toggle-swatch" data-theme="${currentTheme}"></span>
+                                    <span class="theme-toggle-label">${currentLabel}</span>
+                                </button>
+                                <div class="theme-dropdown" id="theme-dropdown">
+                                    ${themeOptions}
+                                </div>
+                            </div>
+                            <button class="header-logout-btn" id="logout-btn" title="Log out">
+                                <span class="btn-text">LOG OUT</span>
                             </button>
-                            <div class="theme-dropdown" id="theme-dropdown">
-                                ${themeOptions}
+                        </div>
+                        <div class="header-overflow" id="header-overflow">
+                            <button class="header-overflow-btn" id="header-overflow-btn" title="More" aria-label="More options">&#8942;</button>
+                            <div class="header-overflow-menu" id="header-overflow-menu">
+                                <button class="overflow-item" id="overflow-graph">Graph view</button>
+                                <button class="overflow-item" id="overflow-cmd">Command palette</button>
+                                <button class="overflow-item" id="overflow-theme">Theme</button>
+                                <button class="overflow-item" id="overflow-settings">Settings</button>
+                                <button class="overflow-item overflow-logout" id="overflow-logout">Log out</button>
                             </div>
                         </div>
-                        <button class="header-logout-btn" id="logout-btn" title="Log out">
-                            <span class="btn-text">LOG OUT</span>
-                        </button>
                     </div>
                 </header>
+                <div class="sidebar-scrim" id="sidebar-scrim"></div>
                 <div class="app-body">
                     ${sidebarEl}
                     <main class="app-main">${bodyHtml}</main>
@@ -490,12 +554,82 @@ export class ThoughtCollector {
         this._syncUnsub = syncStatus.onChange(s => this._updateSyncUI(s))
 
         const syncBtn = this.container.querySelector('#sync-status-btn')
-        if (syncBtn) syncBtn.addEventListener('click', () => syncStatus.check())
+        if (syncBtn) syncBtn.addEventListener('click', () => {
+            syncStatus.check()
+            const pending = offlineQueue.getPending().length
+            this._toast(`Sync: ${syncStatus.get()}${pending ? ` · ${pending} pending` : ''}`)
+        })
+
+        // ── Mobile slide-in drawer (replaces hidden sidebar) ──
+        const hamburger = this.container.querySelector('#mobile-menu-btn')
+        const drawer = this.container.querySelector('#app-sidebar')
+        const scrim = this.container.querySelector('#sidebar-scrim')
+        this._closeDrawer = () => {
+            if (drawer) drawer.classList.remove('open')
+            if (scrim) scrim.classList.remove('open')
+            if (hamburger) hamburger.classList.remove('open')
+        }
+        if (hamburger && drawer && scrim) {
+            hamburger.addEventListener('click', () => {
+                const open = !drawer.classList.contains('open')
+                drawer.classList.toggle('open', open)
+                scrim.classList.toggle('open', open)
+                hamburger.classList.toggle('open', open)
+            })
+            scrim.addEventListener('click', () => this._closeDrawer())
+        }
+
+        // ── Header overflow (kebab) menu — mobile ──
+        const overflowBtn = this.container.querySelector('#header-overflow-btn')
+        const overflowMenu = this.container.querySelector('#header-overflow-menu')
+        if (overflowBtn && overflowMenu) {
+            overflowBtn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                overflowMenu.classList.toggle('open')
+            })
+            document.addEventListener('click', (e) => {
+                if (!overflowMenu.contains(e.target) && e.target !== overflowBtn) {
+                    overflowMenu.classList.remove('open')
+                }
+            })
+            const route = (id, fn) => {
+                const el = this.container.querySelector(id)
+                if (el) el.addEventListener('click', () => { overflowMenu.classList.remove('open'); fn() })
+            }
+            // Overflow items delegate to the real (desktop-hidden) controls / handlers
+            route('#overflow-graph', () => this._showGraphView())
+            route('#overflow-cmd', () => this._showCommandPalette())
+            route('#overflow-theme', () => this._showSettingsPanel())
+            route('#overflow-settings', () => this._showSettingsPanel())
+            route('#overflow-logout', () => this.container.querySelector('#logout-btn')?.click())
+        }
+
+        // ── Mobile back button (header) ──
+        const backBtn = this.container.querySelector('#breadcrumb-back')
+        if (backBtn) {
+            // Hidden on the root folders view (nothing to go back to)
+            backBtn.style.display = this.view === 'folders' ? 'none' : ''
+            backBtn.addEventListener('click', async () => {
+                if (this._saving) { this._toast('Please wait — save in progress...'); return }
+                if (this.editorDirty) {
+                    const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                    if (!ok) return
+                }
+                this.editorDirty = false
+                if (this.view === 'editor') { this._navigate('files'); return }
+                const parent = this.currentFolder?.parentId
+                    ? foldersAPI.list().find(f => f.id === this.currentFolder.parentId)
+                    : null
+                if (parent) this._navigate('files', { folder: parent })
+                else this._navigate('folders')
+            })
+        }
 
         // Logout
         this.container.querySelector('#logout-btn').addEventListener('click', async () => {
             document.removeEventListener('keydown', this._escHandler)
             document.removeEventListener('keydown', this._globalKeyHandler)
+            this._removeLifecycleHandlers()
             syncStatus.stopPolling()
             if (this._syncUnsub) this._syncUnsub()
             this._clearAutologoutTimer()
@@ -1638,6 +1772,7 @@ export class ThoughtCollector {
                         placeholder="File title..."
                     />
                     <div class="editor-actions">
+                        <button class="editor-back-btn" id="editor-back-btn" title="Back (ESC)">&larr; Back</button>
                         ${modeButtons}
                         <label class="autosave-toggle" title="Toggle autosave">
                             <input type="checkbox" id="autosave-check" ${autosaveChecked}>
@@ -1672,6 +1807,17 @@ export class ThoughtCollector {
                             <span class="btn-text">Save</span>
                             <span class="btn-glow"></span>
                         </button>
+                        <div class="editor-actions-menu-wrap">
+                            <button class="editor-actions-menu-btn" id="editor-menu-btn" title="More" aria-label="More editor actions">&#8942;</button>
+                            <div class="editor-actions-menu hidden" id="editor-actions-menu">
+                                <button class="menu-item" data-action="pdf">Export PDF</button>
+                                <button class="menu-item" data-action="focus">Focus mode</button>
+                                <button class="menu-item" data-action="star">Star note</button>
+                                <button class="menu-item" data-action="outline">Toggle outline</button>
+                                <button class="menu-item" data-action="backlinks">Toggle backlinks</button>
+                                <button class="menu-item" data-action="shortcuts">Shortcuts</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="format-toolbar" id="format-toolbar">
@@ -1702,6 +1848,7 @@ export class ThoughtCollector {
                     <button class="fmt-btn" data-fmt="callout" title="Callout block">Callout</button>
                     <button class="fmt-btn" data-fmt="highlight" title="Highlight">==</button>
                     <button class="fmt-btn" data-fmt="footnote" title="Footnote">[^]</button>
+                    <button class="fmt-btn fmt-more-btn" id="fmt-more" title="More formatting" aria-label="More formatting">+</button>
                 </div>
                 <div class="editor-body">
                     <div class="editor-pane">
@@ -1811,6 +1958,72 @@ export class ThoughtCollector {
         if (this._outlineOpen) this._updateOutlinePanel()
         if (this._backlinksOpen) this._updateBacklinksPanel()
 
+        // ── Mobile editor back button (ESC has no key on touch keyboards) ──
+        const editorBack = this.container.querySelector('#editor-back-btn')
+        if (editorBack) {
+            editorBack.addEventListener('click', async () => {
+                if (this._saving) { this._toast('Please wait — save in progress...'); return }
+                if (this.editorDirty) {
+                    const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                    if (!ok) return
+                }
+                this.editorDirty = false
+                this._navigate('files')
+            })
+        }
+
+        // ── Editor actions overflow (kebab) menu — mobile ──
+        const editorMenuBtn = this.container.querySelector('#editor-menu-btn')
+        const editorMenu = this.container.querySelector('#editor-actions-menu')
+        if (editorMenuBtn && editorMenu) {
+            editorMenuBtn.addEventListener('click', (e) => {
+                e.stopPropagation()
+                editorMenu.classList.toggle('hidden')
+            })
+            document.addEventListener('click', (e) => {
+                if (!editorMenu.contains(e.target) && e.target !== editorMenuBtn) {
+                    editorMenu.classList.add('hidden')
+                }
+            })
+            // Menu items delegate to the real (mobile-hidden) action buttons
+            const delegate = { pdf: pdfBtn, focus: focusBtn, star: starBtn, outline: outlineBtn, backlinks: backlinksBtn, shortcuts: shortcutsBtn }
+            editorMenu.querySelectorAll('.menu-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    editorMenu.classList.add('hidden')
+                    const target = delegate[item.dataset.action]
+                    if (target) target.click()
+                })
+            })
+        }
+
+        // ── Format toolbar "more" toggle — reveal secondary buttons on mobile ──
+        const fmtMore = this.container.querySelector('#fmt-more')
+        const fmtToolbar = this.container.querySelector('#format-toolbar')
+        if (fmtMore && fmtToolbar) {
+            fmtMore.addEventListener('click', (e) => {
+                e.preventDefault()
+                const expanded = fmtToolbar.classList.toggle('fmt-expanded')
+                fmtMore.textContent = expanded ? '−' : '+'
+            })
+        }
+
+        // ── Robust editor height on iOS via visualViewport ──
+        // Fixed calc(100dvh - …) fights the dynamic URL bar + software keyboard.
+        if (this._isMobile() && window.visualViewport && editorZone) {
+            const vv = window.visualViewport
+            const adjust = () => {
+                const top = editorZone.getBoundingClientRect().top
+                editorZone.style.height = Math.max(200, vv.height - top) + 'px'
+            }
+            vv.addEventListener('resize', adjust)
+            vv.addEventListener('scroll', adjust)
+            this._vvCleanup = () => {
+                vv.removeEventListener('resize', adjust)
+                vv.removeEventListener('scroll', adjust)
+            }
+            adjust()
+        }
+
         preview.addEventListener('click', (e) => {
             // Checkbox click in preview → sync to editor
             if (e.target.type === 'checkbox') {
@@ -1860,7 +2073,7 @@ export class ThoughtCollector {
             // Schedule autosave
             if (this.autosave) {
                 clearTimeout(this._autosaveTimer)
-                this._autosaveTimer = setTimeout(() => doSave(), 2000)
+                this._autosaveTimer = setTimeout(() => doSave(), this._isMobile() ? 1000 : 2000)
             }
         })
 
@@ -1933,7 +2146,8 @@ export class ThoughtCollector {
 
     // ── Format toolbar ──────────────────────────────────────────
     _bindFormatToolbar(textarea, markDirty, preview) {
-        this.container.querySelectorAll('.fmt-btn').forEach(btn => {
+        // Exclude the "more" toggle — it has no data-fmt and owns its own handler.
+        this.container.querySelectorAll('.fmt-btn[data-fmt]').forEach(btn => {
             btn.addEventListener('mousedown', (e) => {
                 e.preventDefault()  // prevent textarea blur
             })

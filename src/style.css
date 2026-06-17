@@ -6,6 +6,34 @@
 :root {
     font-size: 16px;
     line-height: 1.6;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+}
+
+/* ── iOS / touch foundation (theme-agnostic) ──────────────────
+   Removes the tap-highlight flash, the 300ms click delay, and stops
+   rubber-band scroll-chaining from inner panels to the page. */
+.cyber-btn, .icon-btn, .mode-btn, .fmt-btn, .header-icon-btn,
+.header-logout-btn, .sidebar-folder, .sidebar-file-dot,
+.mobile-hamburger, .header-overflow-btn, .editor-actions-menu-btn,
+.breadcrumb-back-btn, .editor-back-btn, .overflow-item, .menu-item,
+button, input[type="button"], input[type="submit"] {
+    -webkit-tap-highlight-color: rgba(255, 0, 60, 0.2);
+    touch-action: manipulation;
+}
+
+.cyber-btn, .icon-btn, .mode-btn, .fmt-btn, .header-icon-btn,
+.header-logout-btn, .sidebar-folder, .sidebar-file-dot,
+.mobile-hamburger, .header-overflow-btn, .editor-actions-menu-btn,
+.breadcrumb-back-btn, .editor-back-btn, .overflow-item, .menu-item {
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.modal-overlay, .modal-box, .editor-zone, .editor-pane,
+.preview-pane, .app-sidebar, .sidebar-list, .editor-actions-menu,
+.header-overflow-menu {
+    overscroll-behavior: contain;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -765,6 +793,18 @@ body {
     50%  { transform: translate(1px, -1px); }
     75%  { transform: translate(-1px, -1px); }
     100% { transform: translate(1px, 1px); }
+}
+
+/* Calm the constant scanline/noise animation for motion-sensitive users and
+   to save battery on phones. Multiply by the theme token so the 9 non-cyberpunk
+   themes (which set --t-scanlines/--t-noise: 0) stay completely flat. */
+@media (prefers-reduced-motion: reduce) {
+    .scanlines { animation: none; opacity: calc(0.3 * var(--t-scanlines, 1)); }
+    .noise-overlay { animation: none; opacity: 0; }
+}
+@media (max-width: 600px) {
+    .scanlines { animation: none; opacity: calc(0.4 * var(--t-scanlines, 1)); }
+    .noise-overlay { display: none; }
 }
 
 /* ── App Title (neutral base) ──────────────────────────────── */
@@ -1649,6 +1689,44 @@ body {
     border-radius: 2px;
 }
 
+/* ── Preview: keep wide content from blowing out the viewport ──
+   (useful on desktop split-view too, essential on mobile) */
+.editor-preview img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 0.75rem 0;
+    border-radius: 2px;
+}
+.editor-preview table {
+    display: block;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.editor-preview pre {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.editor-preview .katex-display {
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    padding: 0.5rem 0;
+    margin: 1rem 0;
+}
+.editor-preview .mermaid {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    display: block;
+    margin: 1rem 0;
+}
+.editor-preview code:not(pre code),
+.editor-preview a {
+    overflow-wrap: break-word;
+    word-break: break-word;
+}
+
 .editor-preview h1,
 .editor-preview h2,
 .editor-preview h3,
@@ -2145,7 +2223,11 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0.65rem 1.5rem;
+    /* max() keeps desktop values when insets are 0; adds notch padding on iOS */
+    padding-top: max(0.65rem, env(safe-area-inset-top));
+    padding-bottom: 0.65rem;
+    padding-left: max(1.5rem, env(safe-area-inset-left));
+    padding-right: max(1.5rem, env(safe-area-inset-right));
     border-bottom: 1px solid var(--t-header-border, var(--nc-red-dim));
     background: var(--t-header-bg, rgba(5, 5, 8, 0.92));
     backdrop-filter: blur(8px);
@@ -2569,7 +2651,7 @@ body {
 /* ── Toast Notification ──────────────────────────────────────── */
 .cyber-toast {
     position: fixed;
-    bottom: 2rem;
+    bottom: max(2rem, calc(1rem + env(safe-area-inset-bottom)));
     right: 2rem;
     z-index: 200;
     padding: 0.75rem 1.25rem;
@@ -2589,20 +2671,162 @@ body {
     opacity: 1;
 }
 
+/* ── Mobile-only controls: hidden on desktop by default ──────── */
+.mobile-hamburger,
+.header-overflow-btn,
+.sidebar-scrim,
+.breadcrumb-back-btn,
+.editor-back-btn,
+.editor-actions-menu-btn,
+.fmt-more-btn { display: none; }
+
 /* ── Responsive ──────────────────────────────────────────────── */
 @media (max-width: 768px) {
-    .app-sidebar { display: none; }
+    /* Hamburger menu button (leftmost in header) */
+    .mobile-hamburger {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        gap: 4px;
+        width: 44px;
+        height: 44px;
+        padding: 8px;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        color: var(--nc-text);
+        flex-shrink: 0;
+    }
+    .mobile-hamburger span {
+        display: block;
+        width: 20px;
+        height: 2px;
+        background: currentColor;
+        border-radius: 1px;
+        transition: transform 0.3s, opacity 0.3s;
+    }
+    .mobile-hamburger.open span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+    .mobile-hamburger.open span:nth-child(2) { opacity: 0; }
+    .mobile-hamburger.open span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+    /* Sidebar becomes an off-canvas slide-in drawer (replaces display:none) */
+    .app-sidebar {
+        display: flex;
+        flex-direction: column;
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: min(280px, 82vw);
+        z-index: 999;
+        transform: translateX(-100%);
+        transition: transform 0.3s ease;
+        overflow-y: auto;
+        background: var(--t-header-bg, rgba(5, 5, 8, 0.97));
+        border-right: 1px solid var(--t-header-border, var(--nc-red-dim));
+        padding-top: max(0.75rem, env(safe-area-inset-top));
+        padding-bottom: max(1rem, env(safe-area-inset-bottom));
+        padding-left: env(safe-area-inset-left);
+    }
+    .app-sidebar.open { transform: translateX(0); }
+
+    .sidebar-scrim {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 998;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s;
+    }
+    .sidebar-scrim.open { opacity: 1; pointer-events: auto; }
+
+    /* Header overflow (kebab) menu — collapse the desktop action cluster */
+    .header-actions-desktop { display: none; }
+    .header-overflow { position: relative; }
+    .header-overflow-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        background: transparent;
+        border: none;
+        color: var(--nc-text);
+        font-size: 1.3rem;
+        cursor: pointer;
+        flex-shrink: 0;
+    }
+    .header-overflow-menu {
+        position: absolute;
+        top: 100%;
+        right: 0;
+        min-width: 170px;
+        background: var(--t-card-bg, var(--nc-bg-dark));
+        border: 1px solid var(--t-card-border, var(--nc-red-dim));
+        border-radius: 4px;
+        z-index: 120;
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        transition: opacity 0.2s, visibility 0.2s;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+    .header-overflow-menu.open { opacity: 1; visibility: visible; pointer-events: auto; }
+    .overflow-item {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 0.7rem 1rem;
+        min-height: 44px;
+        background: none;
+        border: none;
+        color: var(--nc-text);
+        cursor: pointer;
+        font-family: var(--t-font-ui);
+        font-size: 0.85rem;
+        border-bottom: 1px solid var(--t-divider-color, var(--nc-red-dim));
+    }
+    .overflow-item:last-child { border-bottom: none; }
+    .overflow-item:hover { background: rgba(128, 128, 128, 0.1); color: var(--t-accent, var(--nc-red)); }
+    .overflow-logout { color: var(--t-accent, var(--nc-red)); }
+
+    /* Stop iOS auto-zoom: every focusable text input >= 16px on mobile */
+    .cyber-input,
+    .editor-textarea,
+    .cyber-textarea,
+    .find-input,
+    .title-input,
+    .modal-input,
+    input[type="email"],
+    input[type="password"],
+    input[type="text"],
+    input[type="number"] {
+        font-size: 16px;
+    }
+
+    /* 44px minimum tap targets for thumb use */
+    .header-icon-btn { min-width: 44px; min-height: 44px; width: 44px; height: 44px; }
+    .icon-btn { min-height: 44px; min-width: 44px; padding: 0.5rem 0.65rem; }
+    .mode-btn { min-height: 44px; }
+    .modal-btn { min-height: 44px; padding: 0.6rem 1.2rem; }
+    .move-menu-item { min-height: 44px; }
+    .link-btn { min-height: 44px; padding: 0.4rem 0.6rem; display: inline-flex; align-items: center; }
+    .sync-status-btn { min-height: 44px; display: flex; align-items: center; }
+    .fmt-btn { min-height: 44px; }
+    .theme-dropdown-item { min-height: 44px; }
 }
 
 @media (max-width: 600px) {
     /* Header */
     .app-header {
-        padding: 0.5rem 0.75rem;
         gap: 0.4rem;
     }
 
     .header-left {
-        gap: 0.5rem;
+        gap: 0.4rem;
     }
 
     .user-badge {
@@ -2616,6 +2840,85 @@ body {
     .header-logout-btn .btn-text {
         font-size: 0.65rem;
     }
+
+    /* Breadcrumb gives way to a single back button on narrow phones */
+    .breadcrumb { display: none; }
+    .breadcrumb-back-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        background: transparent;
+        border: 1px solid var(--t-divider-color, var(--nc-red-dim));
+        color: var(--nc-text);
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 1rem;
+        flex-shrink: 0;
+    }
+
+    /* Editor: visible Back button (ESC unavailable on touch), prominent Save */
+    .editor-back-btn {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+        padding: 0.5rem 0.7rem;
+        background: transparent;
+        border: 1px solid var(--t-divider-color, var(--nc-red-dim));
+        color: var(--nc-text);
+        border-radius: 4px;
+        cursor: pointer;
+        font-family: var(--t-font-ui);
+        font-size: 0.85rem;
+        white-space: nowrap;
+    }
+    .editor-hint { display: none; }
+
+    /* Editor: collapse secondary actions into a kebab menu */
+    #pdf-btn, #focus-btn, #star-btn, #outline-btn, #backlinks-btn, #shortcuts-btn { display: none; }
+    .editor-actions-menu-wrap { position: relative; }
+    .editor-actions-menu-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        min-width: 44px;
+        background: transparent;
+        border: 1px solid var(--t-card-border, var(--nc-red-dim));
+        color: var(--nc-text-dim);
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 1.2rem;
+    }
+    .editor-actions-menu {
+        position: absolute;
+        top: 100%;
+        right: 0;
+        margin-top: 4px;
+        min-width: 180px;
+        background: var(--t-card-bg, var(--nc-bg-dark));
+        border: 1px solid var(--t-card-border, var(--nc-red-dim));
+        border-radius: 4px;
+        z-index: 60;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    }
+    .editor-actions-menu.hidden { display: none; }
+    .menu-item {
+        display: block;
+        width: 100%;
+        text-align: left;
+        min-height: 44px;
+        padding: 0.6rem 1rem;
+        background: none;
+        border: none;
+        color: var(--nc-text);
+        cursor: pointer;
+        font-family: var(--t-font-ui);
+        font-size: 0.85rem;
+    }
+    .menu-item:hover { background: rgba(128, 128, 128, 0.1); color: var(--t-accent, var(--nc-red)); }
+    #save-btn { min-width: 72px; min-height: 44px; }
 
     /* Main content */
     .app-main {
@@ -2631,7 +2934,7 @@ body {
 
     /* Toast spans full width */
     .cyber-toast {
-        bottom: 1rem;
+        bottom: max(1rem, calc(0.5rem + env(safe-area-inset-bottom)));
         right: 0.75rem;
         left: 0.75rem;
         max-width: none;
@@ -2645,24 +2948,40 @@ body {
     }
 
     .editor-actions {
-        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        align-items: center;
     }
+    /* Push Save + kebab to the right edge of the wrapped row */
+    .editor-actions .save-status { margin-left: auto; }
 
     /* Mode toggle — hide split on mobile, stretch edit/preview */
     .mode-btn[data-mode="split"] { display: none; }
     .mode-toggle { flex: 1; justify-content: center; }
     .mode-btn { flex: 1; text-align: center; padding: 0.45rem 0.5rem; }
 
-    /* Editor zone — use full screen height minus header */
+    /* Editor zone — fill available space; JS visualViewport handler sets an
+       exact height when the keyboard opens (see _renderEditor). */
     .editor-zone {
-        height: calc(100dvh - 130px);
+        height: auto;
+        flex: 1;
+        min-height: 0;
+        padding-bottom: env(safe-area-inset-bottom, 0);
     }
 
-    /* Preview — no extra padding waste on small screens */
+    /* Preview — tighter padding/type on small screens */
     .editor-preview {
-        padding: 1rem;
+        padding: 0.75rem 0.5rem;
         font-size: 0.9rem;
     }
+    .editor-preview pre,
+    .editor-preview pre code { font-size: 0.75rem; }
+    .editor-preview pre { padding: 0.75rem; margin: 0.75rem 0; }
+    .editor-preview h1 { font-size: 1.1rem; }
+    .editor-preview h2 { font-size: 0.95rem; }
+    .editor-preview h3 { font-size: 0.85rem; }
+    .editor-preview blockquote { padding-left: 0.5rem; margin: 0.75rem 0; }
+    .callout { padding: 0.5rem 0.75rem; }
 
     /* Toolbar actions (folder view) */
     .toolbar-actions {
@@ -2705,33 +3024,74 @@ body {
         font-size: 1.1rem;
     }
 
-    /* Modal — full width on small screens */
+    /* Modal — full width on small screens (keep safe-area-aware padding) */
     .modal-box {
         width: 95%;
-        padding: 1.5rem;
         min-width: 0;
+        padding: max(1.5rem, calc(1rem + env(safe-area-inset-top))) max(1.5rem, env(safe-area-inset-right)) max(1.5rem, calc(1rem + env(safe-area-inset-bottom))) max(1.5rem, env(safe-area-inset-left));
     }
 
-    /* Format toolbar — scroll horizontally on mobile */
+    /* Format toolbar — touch-friendly grid pinned above the keyboard.
+       ~8 primary buttons fill the row; secondary ones hide behind "+". */
     .format-toolbar {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        padding: 0.2rem 0.3rem;
-        gap: 1px;
+        position: sticky;
+        bottom: 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        padding: 0.4rem 0.5rem;
+        padding-bottom: max(0.4rem, env(safe-area-inset-bottom));
+        background: var(--t-card-bg, var(--nc-bg-dark));
+        border-top: 1px solid var(--t-card-border, var(--nc-red-dim));
+        z-index: 40;
+        overflow: visible;
     }
-
     .fmt-btn {
-        font-size: 0.68rem;
-        padding: 0.2rem 0.35rem;
+        flex: 1 1 18%;
+        min-width: 44px;
+        min-height: 44px;
+        font-size: 0.9rem;
+        padding: 0.2rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
+    .fmt-sep { display: none; }
+    .fmt-more-btn { display: flex; flex: 0 0 44px; font-size: 1.2rem; }
 
-    /* Find bar — full width on mobile */
+    /* Secondary format buttons hidden until "+" is tapped */
+    .fmt-btn[data-fmt="strikethrough"],
+    .fmt-btn[data-fmt="h1"],
+    .fmt-btn[data-fmt="h3"],
+    .fmt-btn[data-fmt="codeblock"],
+    .fmt-btn[data-fmt="quote"],
+    .fmt-btn[data-fmt="ol"],
+    .fmt-btn[data-fmt="image"],
+    .fmt-btn[data-fmt="hr"],
+    .fmt-btn[data-fmt="table"],
+    .fmt-btn[data-fmt="tag"],
+    .fmt-btn[data-fmt="callout"],
+    .fmt-btn[data-fmt="highlight"],
+    .fmt-btn[data-fmt="footnote"] { display: none; }
+    .format-toolbar.fmt-expanded .fmt-btn { display: flex; }
+
+    /* Find bar — full-width top sheet below the header */
     .find-replace-bar {
-        right: 0.5rem;
-        left: 0.5rem;
+        top: max(50px, calc(env(safe-area-inset-top) + 46px));
+        left: 0;
+        right: 0;
+        width: 100%;
         min-width: 0;
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+        box-shadow: none;
+        padding: 0.4rem 0.5rem;
+        padding-left: max(0.5rem, env(safe-area-inset-left));
+        padding-right: max(0.5rem, env(safe-area-inset-right));
     }
+    .find-replace-row { flex-wrap: wrap; gap: 0.25rem; }
+    .find-input { flex: 1; min-width: 120px; }
 
     /* Editor stats — compact on mobile */
     .editor-stats {
@@ -2764,7 +3124,7 @@ body {
     background: var(--nc-bg-dark);
     border: 1px solid var(--t-card-border);
     box-shadow: 0 0 32px var(--t-accent);
-    padding: 2rem;
+    padding: max(2rem, calc(1rem + env(safe-area-inset-top))) max(2rem, env(safe-area-inset-right)) max(2rem, calc(1rem + env(safe-area-inset-bottom))) max(2rem, env(safe-area-inset-left));
     min-width: 300px;
     max-width: 440px;
     width: 90%;
@@ -4086,31 +4446,25 @@ body {
     max-width: 120px;
 }
 
-/* ── Mobile: hide some editor toolbar buttons ───────────────── */
+/* ── Mobile: panels & overlays ───────────────── */
 @media (max-width: 600px) {
-    #outline-btn,
-    #backlinks-btn {
-        display: none;
-    }
-
+    /* Outline/backlinks open as wider drawers when triggered from the kebab */
     .outline-panel,
     .backlinks-panel {
-        width: 180px;
+        width: min(240px, 80vw);
     }
 
-    .header-icon-btn {
-        width: 26px;
-        height: 26px;
-        font-size: 0.85rem;
-    }
-
+    /* Keep a compact, ellipsized sync label (not fully hidden) + bigger dot */
     .sync-label {
-        display: none;
+        display: inline;
+        font-size: 0.6rem;
+        max-width: 72px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
-
-    .sync-status-btn {
-        padding: 4px 6px;
-    }
+    .sync-dot { width: 10px; height: 10px; }
+    .sync-status-btn { padding: 4px 8px; }
 
     .command-palette {
         width: 95%;

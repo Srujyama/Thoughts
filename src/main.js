@@ -1,7 +1,7 @@
 import './style.css'
 import { AuthController } from './auth.js'
 import { ThoughtCollector } from './app.js'
-import { auth, setSessionExpiredHandler } from './api.js'
+import { auth, setSessionExpiredHandler, enableMobileRefreshHandlers } from './api.js'
 
 const appEl = document.querySelector('#app')
 
@@ -25,6 +25,9 @@ function showAuthView() {
 function showAppView() {
     // Start proactive token refresh cycle immediately (non-blocking)
     auth.startRefreshCycle()
+    // Refresh token + re-check sync when the tab returns to the foreground or
+    // the network comes back — background timers get suspended on mobile.
+    enableMobileRefreshHandlers()
     new ThoughtCollector(appEl, () => showAuthView())
 }
 

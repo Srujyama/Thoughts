@@ -675,7 +675,11 @@ export const syncStatus = {
             const res = await fetch(`${BASE_URL}/vault/files`, {
                 headers: { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}` },
             })
-            if (res.ok) syncStatus._set('synced')
+            if (res.ok) {
+                syncStatus._set('synced')
+                // Connection is back — drain any saves queued while offline
+                if (offlineQueue.getPending().length) offlineQueue.flush().catch(() => {})
+            }
             else if (res.status === 401) syncStatus._set('expired')
             else syncStatus._set('offline')
         } catch {
@@ -708,4 +712,91 @@ foldersAPI.listFromCloud = async function () {
         else syncStatus._set('offline')
         throw err
     }
+}
+
+// ── Offline save queue ────────────────────────────────────────
+// When a save fails while offline, stash {path, content} locally
+// (last-write-wins per path) and replay it when the network returns.
+const PENDING_SAVES_KEY = 'nc_pending_saves'
+
+function _loadPending() {
+    try { return JSON.parse(localStorage.getItem(PENDING_SAVES_KEY)) || {} }
+    catch { return {} }
+}
+
+function _savePending(map) {
+    try { localStorage.setItem(PENDING_SAVES_KEY, JSON.stringify(map)) } catch { /* quota */ }
+}
+
+export const offlineQueue = {
+    // Returns array of pending file paths
+    getPending() { return Object.keys(_loadPending()) },
+
+    // Queue a write to retry later (keyed by path → last write wins)
+    enqueue(path, content) {
+        const map = _loadPending()
+        map[path] = { content, queued_at: new Date().toISOString() }
+        _savePending(map)
+    },
+
+    // Try to flush every queued write. Resolves to the number persisted.
+    async flush() {
+        const map = _loadPending()
+        const paths = Object.keys(map)
+        if (!paths.length) return 0
+        let done = 0
+        for (const path of paths) {
+            try {
+                await vaultAPI.writeFile(path, map[path].content)
+                delete map[path]
+                done++
+            } catch {
+                // Still failing — keep it queued and stop trying for now
+                break
+            }
+        }
+        _savePending(map)
+        return done
+    },
+}
+
+// ── Mobile foreground / network refresh ───────────────────────
+// Background tabs on mobile have their setTimeout/setInterval suspended, so the
+// proactive refresh + 60s sync poll stop firing. Re-sync on foreground & online.
+let _mobileHandlersEnabled = false
+
+export function enableMobileRefreshHandlers() {
+    if (_mobileHandlersEnabled) return  // register exactly once per session
+    _mobileHandlersEnabled = true
+
+    const refreshIfStale = async () => {
+        const token = localStorage.getItem(TOKEN_KEY)
+        if (!token) return
+        const exp = _parseJwtExp(token)
+        const nowSec = Math.floor(Date.now() / 1000)
+        if (exp && exp - nowSec < 120) {
+            try {
+                if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
+                await _refreshPromise
+            } catch { /* will be retried on next request */ }
+        }
+        // Re-arm the proactive timer that may have been suspended in the background
+        _scheduleProactiveRefresh()
+    }
+
+    document.addEventListener('visibilitychange', async () => {
+        if (document.hidden) return
+        await refreshIfStale()
+        syncStatus.check()
+        offlineQueue.flush().then(n => { if (n) syncStatus.check() }).catch(() => {})
+    })
+
+    window.addEventListener('online', async () => {
+        await refreshIfStale()
+        const n = await offlineQueue.flush().catch(() => 0)
+        syncStatus.check()
+        return n
+    })
+
+    window.addEventListener('offline', () => syncStatus._set('offline'))
 }

@@ -1,0 +1,14 @@
+{
+  "name": "Thoughts - Markdown Notes",
+  "short_name": "Thoughts",
+  "description": "An Obsidian-style markdown notes web app",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#050508",
+  "theme_color": "#050508",
+  "icons": [
+    { "src": "/Brain.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/Brain.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

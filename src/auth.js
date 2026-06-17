@@ -7,7 +7,10 @@ export class AuthController {
         this.onAuthSuccess = onAuthSuccess
         this.onShowDocs = onShowDocs
         this._mode = 'login'   // 'login' | 'signup'
-        this._formRevealed = false
+        // On mobile, reveal the form immediately so Safari/iOS can index the
+        // login form for password autofill/save. The click-to-reveal typewriter
+        // intro is desktop-only flourish.
+        this._formRevealed = window.innerWidth <= 768
         this._cycleTimer = null
     }
 
@@ -17,6 +20,7 @@ export class AuthController {
         const submitLabel = isSignup ? 'Create account' : 'Sign in'
         const toggleLabel = isSignup ? 'Have an account?' : 'New user?'
         const toggleAction = isSignup ? 'Sign in' : 'Create account'
+        const passwordAutocomplete = isSignup ? 'new-password' : 'current-password'
 
         this.container.innerHTML = `
             <div class="auth-panel">
@@ -35,9 +39,14 @@ export class AuthController {
                         <input
                             type="email"
                             id="auth-email"
+                            name="email"
                             class="cyber-input"
                             placeholder="you@example.com"
                             autocomplete="email"
+                            autocapitalize="off"
+                            autocorrect="off"
+                            spellcheck="false"
+                            inputmode="email"
                             required
                         />
                     </div>
@@ -47,9 +56,10 @@ export class AuthController {
                         <input
                             type="password"
                             id="auth-password"
+                            name="password"
                             class="cyber-input"
                             placeholder="••••••••••"
-                            autocomplete="current-password"
+                            autocomplete="${passwordAutocomplete}"
                             required
                         />
                     </div>
@@ -182,6 +192,10 @@ export class AuthController {
             this.container.querySelector('#toggle-mode').textContent =
                 isSignup ? 'Sign in' : 'Create account'
             this.container.querySelector('#auth-error').classList.add('hidden')
+            // Keep the password field's autocomplete hint correct so browsers
+            // offer "save new password" on signup and autofill on login.
+            const pwd = this.container.querySelector('#auth-password')
+            if (pwd) pwd.autocomplete = isSignup ? 'new-password' : 'current-password'
         })
     }
 
@@ -211,6 +225,19 @@ export class AuthController {
                 await auth.login(email, password)
             } else {
                 await auth.signup(email, password)
+            }
+            // Explicitly ask the browser to store the credential. On iOS Safari
+            // this surfaces the "Save Password" sheet even though we submit via
+            // fetch (no native form navigation). Feature-detected + non-fatal.
+            if (window.PasswordCredential && navigator.credentials) {
+                try {
+                    const formEl = this.container.querySelector('#auth-form')
+                    if (formEl instanceof HTMLFormElement) {
+                        await navigator.credentials.store(new window.PasswordCredential(formEl))
+                    }
+                } catch (credErr) {
+                    console.debug('Credential save skipped:', credErr && credErr.message)
+                }
             }
             // Smooth transition — ensure minimum 300ms so user sees feedback
             const elapsed = performance.now() - startTime
