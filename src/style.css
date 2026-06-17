@@ -2819,14 +2819,19 @@ body {
     }
 
     /* 44px minimum tap targets for thumb use */
-    .header-icon-btn { min-width: 44px; min-height: 44px; width: 44px; height: 44px; }
+    /* Descendant selector (0,0,2,0) so this 44px touch target beats the later
+       unconditional base .header-icon-btn (0,0,1,0, width:30px) regardless of
+       source order. */
+    .app-header .header-icon-btn { min-width: 44px; min-height: 44px; width: 44px; height: 44px; }
     .icon-btn { min-height: 44px; min-width: 44px; padding: 0.5rem 0.65rem; }
     .mode-btn { min-height: 44px; }
     .modal-btn { min-height: 44px; padding: 0.6rem 1.2rem; }
     .move-menu-item { min-height: 44px; }
     .link-btn { min-height: 44px; padding: 0.4rem 0.6rem; display: inline-flex; align-items: center; }
     .sync-status-btn { min-height: 44px; display: flex; align-items: center; }
-    .fmt-btn { min-height: 44px; }
+    /* .fmt-btn touch height is set in the <=600px block where the toolbar reflows
+       into a wrapping grid; forcing it here would make buttons 44px tall while the
+       toolbar is still the compact desktop horizontal bar (601-768px). */
     .theme-dropdown-item { min-height: 44px; }
 }
 
@@ -3796,6 +3801,21 @@ body {
         right: -8px;
         min-width: 130px;
     }
+}
+
+/* Very narrow phones / notched landscape: reclaim header width so the mobile
+   kebab (the sole entry point to Graph/Command palette/Theme/Settings/Log out)
+   can't be clipped off the right edge by body{overflow-x:hidden}. */
+@media (max-width: 360px) {
+    .app-header {
+        padding-left: max(0.9rem, env(safe-area-inset-left));
+        padding-right: max(0.9rem, env(safe-area-inset-right));
+        gap: 0.3rem;
+    }
+    .header-right { gap: 0.25rem; }
+    /* Descendant selector (0,0,2,0) so this beats the later, lower-specificity
+       <=600px ".sync-label { display: inline }" rule that also matches here. */
+    .app-header .sync-label { display: none; }  /* .sync-dot still conveys sync state */
 }
 
 /* ══════════════════════════════════════════════════════════════
