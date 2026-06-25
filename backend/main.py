@@ -1,12 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import auth, thoughts, vault
+from dependencies.firebase import get_app
 from dotenv import load_dotenv
 from pathlib import Path
-import os
 
 # Always load .env from the same directory as this file, regardless of cwd
 load_dotenv(Path(__file__).parent / ".env")
+
+# Initialize the Firebase Admin SDK once at startup (fails fast on bad creds).
+get_app()
 
 app = FastAPI(title="Thoughts API", version="1.0.0")
 

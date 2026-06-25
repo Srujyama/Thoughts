@@ -1,6 +1,5 @@
 from pydantic import BaseModel, field_validator
 from datetime import datetime
-from uuid import UUID
 
 
 class SignupRequest(BaseModel):
@@ -43,10 +42,11 @@ class ThoughtCreate(BaseModel):
 
 
 class ThoughtResponse(BaseModel):
-    id: UUID
+    # Firestore document IDs (and migrated Supabase UUIDs) are plain strings.
+    id: str
     text: str
     created_at: datetime
-    user_id: UUID
+    user_id: str
 
 
 class ThoughtsListResponse(BaseModel):

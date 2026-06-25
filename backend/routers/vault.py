@@ -1,27 +1,26 @@
 """
-Vault router — two-way sync between Supabase Storage and local Obsidian vault.
+Vault router — two-way sync between Cloud Storage for Firebase and the local vault.
 
-Supabase Storage bucket: "vault"
-Files are stored at: vault/{user_id}/{relative_path}
+Storage layout: files live at "{user_id}/{relative_path}" in the default bucket.
+The HTTP contract is unchanged from the Supabase version, so the frontend and the
+local watcher (vault_sync.py) need no changes.
 """
 
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.responses import Response
 from pydantic import BaseModel
+from firebase_admin import storage
+from google.cloud.exceptions import NotFound
+
 from dependencies.auth import get_current_user
-from supabase import create_client
-import os
+from dependencies.firebase import get_app
 
 router = APIRouter()
 
-BUCKET = "vault"
 
-
-def get_supabase():
-    return create_client(
-        os.getenv("SUPABASE_URL"),
-        os.getenv("SUPABASE_SERVICE_KEY"),
-    )
+def _bucket():
+    get_app()  # ensure init (sets default storageBucket)
+    return storage.bucket()
 
 
 class FileContent(BaseModel):
@@ -39,51 +38,41 @@ class FileListItem(BaseModel):
 
 @router.get("/files", response_model=list[FileListItem])
 async def list_files(current_user: dict = Depends(get_current_user)):
-    supabase = get_supabase()
     user_id = current_user["user_id"]
     root_prefix = f"{user_id}/"
 
-    def list_recursive(prefix: str) -> list[FileListItem]:
-        """List all files recursively under prefix, returning paths relative to root_prefix."""
-        try:
-            items = supabase.storage.from_(BUCKET).list(prefix, {"limit": 1000, "offset": 0})
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Storage error: {e}")
+    try:
+        # list_blobs(prefix=...) with no delimiter lists every nested object.
+        blobs = _bucket().list_blobs(prefix=root_prefix)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Storage error: {e}")
 
-        result = []
-        for item in items:
-            name = item.get("name", "")
-            if not name:
-                continue
-            full_path = f"{prefix}{name}"
-            # Supabase returns folders as items with id=None and no metadata
-            is_folder = item.get("id") is None and item.get("metadata") is None
-            if is_folder:
-                # Recurse into subfolder
-                result.extend(list_recursive(f"{full_path}/"))
-            else:
-                result.append(FileListItem(
-                    path=full_path.removeprefix(root_prefix),
-                    updated_at=item.get("updated_at"),
-                    size=item.get("metadata", {}).get("size") if item.get("metadata") else None,
-                ))
-        return result
-
-    return list_recursive(root_prefix)
+    result = []
+    for blob in blobs:
+        rel = blob.name[len(root_prefix):]
+        if not rel:
+            continue  # the prefix "folder placeholder" object, if any
+        result.append(FileListItem(
+            path=rel,
+            updated_at=blob.updated.isoformat() if blob.updated else None,
+            size=blob.size,
+        ))
+    return result
 
 
 # ── Read a single file ────────────────────────────────────────────────────────
 
 @router.get("/files/{file_path:path}")
 async def read_file(file_path: str, current_user: dict = Depends(get_current_user)):
-    supabase = get_supabase()
     user_id = current_user["user_id"]
-    storage_path = f"{user_id}/{file_path}"
+    blob = _bucket().blob(f"{user_id}/{file_path}")
 
     try:
-        data = supabase.storage.from_(BUCKET).download(storage_path)
-    except Exception:
+        data = blob.download_as_bytes()
+    except NotFound:
         raise HTTPException(status_code=404, detail="File not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download failed: {e}")
 
     return Response(content=data, media_type="text/markdown; charset=utf-8")
 
@@ -96,18 +85,14 @@ async def write_file(
     body: FileContent,
     current_user: dict = Depends(get_current_user),
 ):
-    supabase = get_supabase()
     user_id = current_user["user_id"]
-    storage_path = f"{user_id}/{file_path}"
+    blob = _bucket().blob(f"{user_id}/{file_path}")
     encoded = body.content.encode("utf-8")
 
     try:
-        # upsert: upload with overwrite
-        supabase.storage.from_(BUCKET).upload(
-            storage_path,
-            encoded,
-            {"content-type": "text/markdown", "upsert": "true"},
-        )
+        # Cloud Storage objects are immutable; an upload to an existing name
+        # replaces it — i.e. upsert semantics, no special flag needed.
+        blob.upload_from_string(encoded, content_type="text/markdown")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
@@ -118,12 +103,14 @@ async def write_file(
 
 @router.delete("/files/{file_path:path}", status_code=204)
 async def delete_file(file_path: str, current_user: dict = Depends(get_current_user)):
-    supabase = get_supabase()
     user_id = current_user["user_id"]
-    storage_path = f"{user_id}/{file_path}"
+    blob = _bucket().blob(f"{user_id}/{file_path}")
 
     try:
-        supabase.storage.from_(BUCKET).remove([storage_path])
+        blob.delete()
+    except NotFound:
+        # Already gone — treat delete as idempotent.
+        return None
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
 

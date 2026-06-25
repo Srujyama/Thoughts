@@ -1,95 +1,73 @@
 from fastapi import APIRouter, HTTPException
 from models.schemas import SignupRequest, LoginRequest, AuthResponse
 from pydantic import BaseModel
-from supabase import create_client
-import os
 import httpx
+
+from dependencies.firebase import web_api_key
 
 router = APIRouter()
 
-SUPABASE_URL = lambda: os.getenv("SUPABASE_URL")
-SUPABASE_KEY = lambda: os.getenv("SUPABASE_SERVICE_KEY")
+IDENTITY_URL = "https://identitytoolkit.googleapis.com/v1/accounts"
+SECURE_TOKEN_URL = "https://securetoken.googleapis.com/v1/token"
 
 
-def get_supabase():
-    return create_client(SUPABASE_URL(), SUPABASE_KEY())
-
-
-def _auth_headers():
-    return {
-        "apikey": SUPABASE_KEY(),
-        "Authorization": f"Bearer {SUPABASE_KEY()}",
-        "Content-Type": "application/json",
-    }
+def _error_message(resp: httpx.Response) -> str:
+    try:
+        return resp.json().get("error", {}).get("message", resp.text)
+    except Exception:
+        return resp.text
 
 
 @router.post("/signup", response_model=AuthResponse, status_code=201)
 async def signup(body: SignupRequest):
-    url = SUPABASE_URL()
-    headers = _auth_headers()
-
-    # Create user via admin API (auto-confirms email)
+    key = web_api_key()
     async with httpx.AsyncClient() as client:
-        create = await client.post(
-            f"{url}/auth/v1/admin/users",
-            headers=headers,
-            json={"email": body.email, "password": body.password, "email_confirm": True},
+        res = await client.post(
+            f"{IDENTITY_URL}:signUp?key={key}",
+            json={"email": body.email, "password": body.password, "returnSecureToken": True},
         )
 
-    if create.status_code == 422:
-        detail = create.json().get("msg", create.text)
-        if "already" in detail.lower() or "registered" in detail.lower():
+    if res.status_code != 200:
+        msg = _error_message(res)
+        if "EMAIL_EXISTS" in msg:
             raise HTTPException(status_code=409, detail="An account with this email already exists")
-        raise HTTPException(status_code=400, detail=detail)
+        if "WEAK_PASSWORD" in msg:
+            raise HTTPException(status_code=400, detail="Password is too weak (minimum 6 characters)")
+        raise HTTPException(status_code=400, detail=msg)
 
-    if create.status_code not in (200, 201):
-        detail = create.json().get("message") or create.json().get("msg") or create.text
-        if "already" in detail.lower():
-            raise HTTPException(status_code=409, detail="An account with this email already exists")
-        raise HTTPException(status_code=400, detail=detail)
-
-    # Sign in to get a session token
-    async with httpx.AsyncClient() as client:
-        login = await client.post(
-            f"{url}/auth/v1/token?grant_type=password",
-            headers=headers,
-            json={"email": body.email, "password": body.password},
-        )
-
-    if login.status_code != 200:
-        raise HTTPException(status_code=400, detail="Account created but sign-in failed")
-
-    data = login.json()
+    data = res.json()
     return AuthResponse(
-        access_token=data["access_token"],
-        refresh_token=data.get("refresh_token", ""),
-        user_id=data["user"]["id"],
-        email=data["user"]["email"],
+        access_token=data["idToken"],
+        refresh_token=data.get("refreshToken", ""),
+        user_id=data["localId"],
+        email=data["email"],
     )
 
 
 @router.post("/login", response_model=AuthResponse)
 async def login(body: LoginRequest):
-    url = SUPABASE_URL()
-    headers = _auth_headers()
-
+    key = web_api_key()
     async with httpx.AsyncClient() as client:
         res = await client.post(
-            f"{url}/auth/v1/token?grant_type=password",
-            headers=headers,
-            json={"email": body.email, "password": body.password},
+            f"{IDENTITY_URL}:signInWithPassword?key={key}",
+            json={"email": body.email, "password": body.password, "returnSecureToken": True},
         )
 
     if res.status_code != 200:
-        detail = res.json().get("error_description") or res.json().get("message") or "Invalid email or password"
-        raise HTTPException(status_code=401, detail=detail)
+        msg = _error_message(res)
+        # Email-enumeration protection collapses bad email/password into one code.
+        if any(c in msg for c in ("INVALID_LOGIN_CREDENTIALS", "INVALID_PASSWORD", "EMAIL_NOT_FOUND")):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        if "USER_DISABLED" in msg:
+            raise HTTPException(status_code=403, detail="This account has been disabled")
+        raise HTTPException(status_code=401, detail=msg)
 
     data = res.json()
     return AuthResponse(
-        access_token=data["access_token"],
-        refresh_token=data.get("refresh_token", ""),
-        user_id=data["user"]["id"],
-        email=data["user"]["email"],
+        access_token=data["idToken"],
+        refresh_token=data.get("refreshToken", ""),
+        user_id=data["localId"],
+        email=data["email"],
     )
 
 
@@ -99,25 +77,24 @@ class RefreshRequest(BaseModel):
 
 @router.post("/refresh", response_model=AuthResponse)
 async def refresh(body: RefreshRequest):
-    url = SUPABASE_URL()
-    headers = _auth_headers()
-
+    key = web_api_key()
     async with httpx.AsyncClient() as client:
+        # The secure-token endpoint is form-encoded and returns snake_case fields.
         res = await client.post(
-            f"{url}/auth/v1/token?grant_type=refresh_token",
-            headers=headers,
-            json={"refresh_token": body.refresh_token},
+            f"{SECURE_TOKEN_URL}?key={key}",
+            data={"grant_type": "refresh_token", "refresh_token": body.refresh_token},
         )
 
     if res.status_code != 200:
         raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
 
     data = res.json()
+    # The refresh response carries id_token / refresh_token / user_id but NOT email.
     return AuthResponse(
-        access_token=data["access_token"],
+        access_token=data["id_token"],
         refresh_token=data.get("refresh_token", ""),
-        user_id=data["user"]["id"],
-        email=data["user"]["email"],
+        user_id=data["user_id"],
+        email="",
     )
 
 
