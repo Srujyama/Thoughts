@@ -1327,6 +1327,12 @@ body {
     height: 100%;
     font-size: 0.95rem;
     line-height: 1.8;
+    /* Canonical indent unit is a literal tab; render it 4 columns wide so nested
+       list indentation lines up visually (Obsidian "use tabs" parity). */
+    tab-size: 4;
+    -moz-tab-size: 4;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
 }
 
 .editor-footer {

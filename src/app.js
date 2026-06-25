@@ -2218,24 +2218,15 @@ export class ThoughtCollector {
                 textarea.focus()
                 return
             case 'ul':
-                replacement = this._prependLine('- ', start, val, selected)
-                textarea.value = replacement.val
-                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
-                textarea.dispatchEvent(new Event('input'))
+                this._toggleList(textarea, 'ul')
                 textarea.focus()
                 return
             case 'ol':
-                replacement = this._prependLine('1. ', start, val, selected)
-                textarea.value = replacement.val
-                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
-                textarea.dispatchEvent(new Event('input'))
+                this._toggleList(textarea, 'ol')
                 textarea.focus()
                 return
             case 'task':
-                replacement = this._prependLine('- [ ] ', start, val, selected)
-                textarea.value = replacement.val
-                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
-                textarea.dispatchEvent(new Event('input'))
+                this._toggleList(textarea, 'task')
                 textarea.focus()
                 return
             case 'link':
@@ -2293,15 +2284,20 @@ export class ThoughtCollector {
         const endIdx = lineEnd === -1 ? val.length : lineEnd
         const currentLine = val.slice(lineStart, endIdx)
 
-        // If line already has the prefix, remove it
-        if (currentLine.startsWith(prefix)) {
-            const newVal = val.slice(0, lineStart) + currentLine.slice(prefix.length) + val.slice(endIdx)
+        // Preserve any leading indentation; operate on the content after it.
+        const indentMatch = currentLine.match(/^[ \t]*/)
+        const indent = indentMatch[0]
+        const body = currentLine.slice(indent.length)
+
+        // If line already has the prefix (after indent), remove it (toggle off).
+        if (body.startsWith(prefix)) {
+            const newVal = val.slice(0, lineStart) + indent + body.slice(prefix.length) + val.slice(endIdx)
             return { val: newVal, cursor: cursorPos - prefix.length }
         }
 
-        // Strip any existing heading/list prefix before adding new one
-        const stripped = currentLine.replace(/^(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|- \[[ xX]\]\s+|>\s+)/, '')
-        const newLine = prefix + stripped
+        // Strip any existing heading/list/quote prefix before adding the new one.
+        const stripped = body.replace(/^(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|- \[[ xX]\]\s+|>\s+)/, '')
+        const newLine = indent + prefix + stripped
         const newVal = val.slice(0, lineStart) + newLine + val.slice(endIdx)
         return { val: newVal, cursor: lineStart + newLine.length }
     }
@@ -2328,6 +2324,18 @@ export class ThoughtCollector {
         } else if (key === 'e') {
             e.preventDefault()
             this._applyFormat('code', textarea)
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+        } else if (key === 'l') {
+            // Toggle current line(s) as a bullet list.
+            e.preventDefault()
+            this._toggleList(textarea, 'ul')
+            markDirty()
+            this._renderPreview(preview, textarea.value)
+        } else if (e.key === 'Enter') {
+            // Toggle task done on the current line(s).
+            e.preventDefault()
+            this._toggleDone(textarea)
             markDirty()
             this._renderPreview(preview, textarea.value)
         } else if (key === '/' || key === '?') {
@@ -2682,37 +2690,281 @@ export class ThoughtCollector {
         overlay.focus()
     }
 
+    // ── Indentation primitives (canonical unit = literal tab) ──────
+    // One indent level = one '\t'. TABSTOP = visual columns a tab spans.
+    // These make every list/indent op deterministic on mixed tab/2-space/4-space files.
+
+    _lineBounds(val, pos) {
+        const lineStart = val.lastIndexOf('\n', pos - 1) + 1
+        const nl = val.indexOf('\n', pos)
+        const lineEnd = nl === -1 ? val.length : nl
+        return { lineStart, lineEnd }
+    }
+
+    _splitIndent(line) {
+        const m = line.match(/^[ \t]*/)
+        return { indent: m[0], rest: line.slice(m[0].length) }
+    }
+
+    // Visual column width of an indent string (tab advances to next 4-col stop).
+    _indentWidth(indent) {
+        const TABSTOP = 4
+        let col = 0
+        for (const ch of indent) {
+            if (ch === '\t') col += TABSTOP - (col % TABSTOP)
+            else col += 1
+        }
+        return col
+    }
+
+    // Indent depth in levels — used only by subtree detection and renumber grouping.
+    _indentLevels(indent) {
+        return Math.round(this._indentWidth(indent) / 4)
+    }
+
+    // Remove one indent level from an indent string, handling tab / 4-space / legacy 2-space.
+    _removeOneLevel(indent) {
+        if (indent.startsWith('\t')) return indent.slice(1)
+        const n = (indent.match(/^ */) || [''])[0].length
+        if (n === 0) return indent
+        const remove = (n % 4 === 2) ? 2 : Math.min(4, n)
+        return indent.slice(remove)
+    }
+
+    _addOneLevel(indent) {
+        return '\t' + indent
+    }
+
+    // Mark each line that is inside a fenced code block (``` or ~~~), so indent
+    // normalization / multi-line indent never touches code.
+    _fenceMask(lines) {
+        const mask = new Array(lines.length).fill(false)
+        let fence = null // {char, len}
+        for (let i = 0; i < lines.length; i++) {
+            const m = lines[i].match(/^([ \t]*)(`{3,}|~{3,})(.*)$/)
+            if (!fence && m && !(m[2][0] === '`' && m[3].includes('`'))) {
+                fence = { char: m[2][0], len: m[2].length }
+                mask[i] = true
+            } else if (fence && m && m[2][0] === fence.char && m[2].length >= fence.len &&
+                       lines[i].slice(m[1].length + m[2].length).trim() === '') {
+                mask[i] = true
+                fence = null
+            } else if (fence) {
+                mask[i] = true
+            }
+        }
+        return mask
+    }
+
+    // Measure leading indentation in visual columns; returns where content starts.
+    _measureCols(line, tabSize = 4) {
+        let col = 0, idx = 0
+        for (; idx < line.length; idx++) {
+            const ch = line[idx]
+            if (ch === '\t') col += tabSize - (col % tabSize)
+            else if (ch === ' ') col += 1
+            else break
+        }
+        return { cols: col, idx, rest: line.slice(idx) }
+    }
+
+    // Range of a list item's whole subtree (itself + deeper descendants + interleaved blanks).
+    _subtreeRange(val, lineStart) {
+        const { lineEnd } = this._lineBounds(val, lineStart)
+        const baseLevel = this._indentLevels(this._splitIndent(val.slice(lineStart, lineEnd)).indent)
+        let endLine = lineEnd
+        let p = lineEnd
+        while (p < val.length) {
+            const ns = p + 1
+            if (ns > val.length) break
+            const nlPos = val.indexOf('\n', ns)
+            const ne = nlPos === -1 ? val.length : nlPos
+            const ln = val.slice(ns, ne)
+            if (ln.trim() === '') { endLine = ne; p = ne; continue }
+            const lvl = this._indentLevels(this._splitIndent(ln).indent)
+            if (lvl <= baseLevel) break
+            endLine = ne; p = ne
+        }
+        return { start: lineStart, end: endLine }
+    }
+
+    // Renumber the contiguous ordered-list run containing the line at `anyLineStart`,
+    // keeping numbers sequential. Children (deeper lines) are transparent; blanks /
+    // shallower / same-level-non-ordered lines end the run. Caret is preserved.
+    _renumberRun(textarea, anyLineStart) {
+        const val = textarea.value
+        const lines = val.split('\n')
+        // Map char offset -> line index for anyLineStart
+        let editedIdx = 0, acc = 0
+        for (let i = 0; i < lines.length; i++) {
+            if (acc === anyLineStart) { editedIdx = i; break }
+            acc += lines[i].length + 1
+            if (acc > anyLineStart) { editedIdx = i; break }
+        }
+        const ordRe = /^([ \t]*)(\d+)([.)])(\s+)/
+        const editM = lines[editedIdx] && lines[editedIdx].match(ordRe)
+        if (!editM) return
+        const runLevel = this._indentLevels(editM[1])
+
+        // Walk up to the run start. A run is bounded by a blank line, a shallower
+        // level, or a same-level non-ordered item; deeper children are transparent.
+        let s = editedIdx
+        let hasOrderedAbove = false
+        for (let i = editedIdx - 1; i >= 0; i--) {
+            const ln = lines[i]
+            if (ln.trim() === '') break
+            const lvl = this._indentLevels(this._splitIndent(ln).indent)
+            if (lvl > runLevel) continue // deeper child, skip
+            if (lvl < runLevel) break
+            if (!ordRe.test(ln)) break
+            s = i
+            hasOrderedAbove = true
+        }
+        // Walk down to the run end
+        let eLine = editedIdx
+        for (let i = editedIdx + 1; i < lines.length; i++) {
+            const ln = lines[i]
+            if (ln.trim() === '') break
+            const lvl = this._indentLevels(this._splitIndent(ln).indent)
+            if (lvl > runLevel) continue // deeper child, skip
+            if (lvl < runLevel) break
+            if (!ordRe.test(ln)) break
+            eLine = i
+        }
+
+        const startM = lines[s].match(ordRe)
+        // A run with no ordered sibling above it is a fresh (possibly nested) list →
+        // restart at 1, matching Obsidian. Otherwise keep the existing start number.
+        let num = hasOrderedAbove ? parseInt(startM[2], 10) : 1
+        let caretDelta = 0
+        for (let i = s; i <= eLine; i++) {
+            const mm = lines[i].match(ordRe)
+            if (!mm) continue // a deeper child line, leave untouched
+            const lvl = this._indentLevels(mm[1])
+            if (lvl !== runLevel) continue
+            const oldLen = lines[i].length
+            const newLine = mm[1] + num + mm[3] + mm[4] + lines[i].slice(mm[0].length)
+            if (i < editedIdx) caretDelta += newLine.length - oldLen
+            lines[i] = newLine
+            num++
+        }
+        const start = textarea.selectionStart
+        textarea.value = lines.join('\n')
+        const np = start + caretDelta
+        textarea.setSelectionRange(np, np)
+    }
+
+    // ── In-memory render normalization (NEVER mutates the file) ─────
+    // Converts mixed tab/2-space/4-space list indentation into canonical
+    // space-based indentation sized to each parent's content column, so
+    // `marked` nests reliably. Code fences and YAML frontmatter pass verbatim.
+    _normaliseIndentForRender(md) {
+        if (!md) return md
+        const EOL = md.includes('\r\n') ? '\r\n' : '\n'
+        const lines = md.split(/\r\n|\r|\n/)
+        const mask = this._fenceMask(lines)
+        const out = []
+        const stack = [] // {srcCol, contentCol}
+        let inFrontmatter = false
+        const TAB = 4, tol = 1
+
+        for (let i = 0; i < lines.length; i++) {
+            const raw = lines[i]
+            if (i === 0 && raw.trim() === '---') { inFrontmatter = true; out.push(raw); continue }
+            if (inFrontmatter) {
+                out.push(raw)
+                if (raw.trim() === '---' || raw.trim() === '...') inFrontmatter = false
+                continue
+            }
+            if (mask[i]) { out.push(raw); continue }
+
+            const { cols, rest } = this._measureCols(raw, TAB)
+            const restR = rest.replace(/[ \t]+$/, '')
+            if (rest.trim() === '') { out.push(''); continue }
+
+            const isThematic = /^([-*_])\1{2,}\s*$/.test(rest)
+            const lm = isThematic ? null : rest.match(/^([-*+]|\d{1,9}[.)])(\s+)/)
+
+            if (lm) {
+                const marker = lm[1]
+                const markerW = marker.length
+                const contentOffset = markerW + 1
+                while (stack.length && cols < stack[stack.length - 1].srcCol - tol) stack.pop()
+                let outCol
+                if (stack.length === 0) {
+                    outCol = 0
+                } else if (cols >= stack[stack.length - 1].srcCol + 1) {
+                    outCol = stack[stack.length - 1].contentCol
+                } else {
+                    stack.pop()
+                    outCol = stack.length ? stack[stack.length - 1].contentCol : 0
+                }
+                stack.push({ srcCol: cols, contentCol: outCol + contentOffset })
+                out.push(' '.repeat(outCol) + restR)
+                continue
+            }
+
+            if (stack.length === 0) { out.push(raw.replace(/[ \t]+$/, '')); continue }
+            let host = null
+            for (let s = stack.length - 1; s >= 0; s--) {
+                if (cols >= stack[s].contentCol - tol) { host = stack[s]; break }
+            }
+            if (host) {
+                if (cols >= host.contentCol + 4) {
+                    out.push(raw.replace(/[ \t]+$/, ''))
+                } else {
+                    out.push(' '.repeat(host.contentCol) + restR)
+                }
+            } else {
+                stack.length = 0
+                out.push(raw.replace(/[ \t]+$/, ''))
+            }
+        }
+        return out.join(EOL)
+    }
+
+    // Shared markdown→HTML pipeline (indent fix FIRST, then math, then Obsidian preprocess).
+    _mdToHtml(str) {
+        let s = this._normaliseIndentForRender(str || '')
+        s = this._normaliseMath(s)
+        s = this._preprocessMarkdown(s)
+        return (typeof marked !== 'undefined') ? marked.parse(s) : s
+    }
+
     // ── Obsidian-style editor keydown behaviors ────────────────
     _handleEditorKeydown(e, textarea) {
         const val = textarea.value
         const start = textarea.selectionStart
         const end = textarea.selectionEnd
 
-        if (e.key === 'Enter') {
+        // Let the wikilink autocomplete dropdown own Enter/Tab while it is open.
+        if ((e.key === 'Enter' || e.key === 'Tab') && this._wikilinkOpen) return
+
+        // ── Enter: continue lists / tasks / ordered / quotes ──────
+        // Cmd/Ctrl+Enter is "toggle task done" — let it fall through to the shortcut handler.
+        if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey && start === end) {
             const lineStart = val.lastIndexOf('\n', start - 1) + 1
             const currentLine = val.slice(lineStart, start)
 
-            // Match list prefixes: -, *, +, numbers, or task lists
-            const listMatch = currentLine.match(/^(\s*)([-*+]|\d+[.)]) (\[[ xX]\] )?/)
+            // List / ordered / task continuation. Indent group allows tabs or spaces.
+            const listMatch = currentLine.match(/^([ \t]*)([-*+]|\d+[.)]) (\[[ xX]\] )?/)
             if (listMatch) {
                 const indent = listMatch[1]
                 const bullet = listMatch[2]
                 const taskPart = listMatch[3] || ''
                 const lineContent = currentLine.slice(listMatch[0].length)
 
-                // If line is empty (just the bullet), remove the bullet and dedent / exit list
+                // Empty item (only the marker) → outdent one level, else exit the list.
                 if (!lineContent.trim()) {
                     e.preventDefault()
-                    if (indent.length >= 2) {
-                        // Dedent one level instead of exiting
-                        const newIndent = indent.slice(2)
-                        const newLine = newIndent + bullet + ' ' + (taskPart || '')
+                    if (this._indentLevels(indent) >= 1) {
+                        const newIndent = this._removeOneLevel(indent)
+                        const newLine = newIndent + bullet + ' ' + taskPart
                         const newVal = val.slice(0, lineStart) + newLine + val.slice(start)
                         const newPos = lineStart + newLine.length
                         textarea.value = newVal
                         textarea.setSelectionRange(newPos, newPos)
                     } else {
-                        // Exit list — remove bullet, leave blank line
                         const newVal = val.slice(0, lineStart) + '\n' + val.slice(start)
                         textarea.value = newVal
                         textarea.setSelectionRange(lineStart + 1, lineStart + 1)
@@ -2721,36 +2973,27 @@ export class ThoughtCollector {
                     return
                 }
 
-                // If cursor is at the very start of the line content (right after bullet),
-                // pressing Enter pushes current bullet content down and leaves blank first bullet
-                if (start === lineStart + listMatch[0].length - (lineContent.length > 0 ? lineContent.length : 0)) {
-                    // cursor is at the beginning of text after bullet
-                    // handled normally — fall through to continue-list
-                }
-
-                // If cursor is at the beginning of the line (before bullet content),
-                // split: first bullet stays with text from cursor onward, new bullet above has no content
-                // This is the standard "Enter pushes content down" behavior which the continue-list handles
                 e.preventDefault()
-                // Continue the list
                 let nextBullet = bullet
-                if (/^\d+[.)]$/.test(bullet)) {
-                    nextBullet = (parseInt(bullet) + 1) + bullet.slice(-1)
-                }
+                const isOrdered = /^\d+[.)]$/.test(bullet)
+                if (isOrdered) nextBullet = (parseInt(bullet, 10) + 1) + bullet.slice(-1)
                 const nextTask = taskPart ? '[ ] ' : ''
                 const insertion = '\n' + indent + nextBullet + ' ' + nextTask
                 const newVal = val.slice(0, start) + insertion + val.slice(end)
                 textarea.value = newVal
                 const newPos = start + insertion.length
                 textarea.setSelectionRange(newPos, newPos)
+                // Keep the ordered run sequential after inserting a new item.
+                if (isOrdered) this._renumberRun(textarea, newPos - insertion.length + 1)
                 textarea.dispatchEvent(new Event('input'))
                 return
             }
 
-            // Blockquote continuation
-            const blockquoteMatch = currentLine.match(/^(\s*> )/)
+            // Blockquote continuation (allow leading indent before >).
+            const blockquoteMatch = currentLine.match(/^([ \t]*>[ \t]?)+/)
             if (blockquoteMatch) {
-                const lineContent = currentLine.slice(blockquoteMatch[0].length)
+                const prefix = blockquoteMatch[0]
+                const lineContent = currentLine.slice(prefix.length)
                 if (!lineContent.trim()) {
                     e.preventDefault()
                     const newVal = val.slice(0, lineStart) + '\n' + val.slice(start)
@@ -2760,7 +3003,7 @@ export class ThoughtCollector {
                     return
                 }
                 e.preventDefault()
-                const insertion = '\n' + blockquoteMatch[0]
+                const insertion = '\n' + prefix
                 const newVal = val.slice(0, start) + insertion + val.slice(end)
                 textarea.value = newVal
                 const newPos = start + insertion.length
@@ -2770,68 +3013,212 @@ export class ThoughtCollector {
             }
         }
 
-        // Tab key: indent/dedent list items, or insert spaces
-        if (e.key === 'Tab') {
+        // ── Tab / Shift+Tab: indent / outdent ─────────────────────
+        if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
             e.preventDefault()
-            const lineStart = val.lastIndexOf('\n', start - 1) + 1
-            const lineEnd = val.indexOf('\n', start) === -1 ? val.length : val.indexOf('\n', start)
+            const selSpansLines = start !== end &&
+                val.slice(start, end).includes('\n')
+            const { lineStart, lineEnd } = this._lineBounds(val, start)
             const currentLine = val.slice(lineStart, lineEnd)
-            const listItemMatch = currentLine.match(/^(\s*)([-*+]|\d+[.)]) /)
+            const isListLine = /^[ \t]*([-*+]|\d+[.)]) /.test(currentLine)
 
-            if (listItemMatch) {
-                const currentIndent = listItemMatch[1]
-                if (e.shiftKey) {
-                    // Dedent: remove 2 spaces from start (one indent level)
-                    if (currentIndent.length < 2) return  // already at root level
-                    const dedented = currentLine.slice(2)
-                    const removed = 2
-                    const newVal = val.slice(0, lineStart) + dedented + val.slice(lineEnd)
-                    textarea.value = newVal
-                    textarea.setSelectionRange(Math.max(lineStart, start - removed), Math.max(lineStart, start - removed))
-                    textarea.dispatchEvent(new Event('input'))
-                } else {
-                    // Indent: prepend 2 spaces (one level deeper)
-                    const newVal = val.slice(0, lineStart) + '  ' + currentLine + val.slice(lineEnd)
-                    textarea.value = newVal
-                    textarea.setSelectionRange(start + 2, start + 2)
-                    textarea.dispatchEvent(new Event('input'))
-                }
-            } else {
-                // Regular tab: insert 2 spaces or shift-tab dedents
-                if (e.shiftKey) {
-                    const dedented = currentLine.replace(/^  /, '')
-                    if (dedented !== currentLine) {
-                        const removed = currentLine.length - dedented.length
-                        const newVal = val.slice(0, lineStart) + dedented + val.slice(lineEnd)
-                        textarea.value = newVal
-                        textarea.setSelectionRange(Math.max(lineStart, start - removed), Math.max(lineStart, start - removed))
-                        textarea.dispatchEvent(new Event('input'))
+            if (selSpansLines) {
+                this._indentSelection(textarea, e.shiftKey)
+                return
+            }
+
+            if (isListLine) {
+                // Indent / outdent the whole subtree (item + deeper descendants).
+                const { start: rStart, end: rEnd } = this._subtreeRange(val, lineStart)
+                const block = val.slice(rStart, rEnd)
+                const mask = this._fenceMask(block.split('\n'))
+                const blines = block.split('\n')
+                let removedOnFirst = 0
+                const newLines = blines.map((ln, idx) => {
+                    if (mask[idx]) return ln
+                    if (e.shiftKey) {
+                        const { indent, rest } = this._splitIndent(ln)
+                        const newIndent = this._removeOneLevel(indent)
+                        if (idx === 0) removedOnFirst = indent.length - newIndent.length
+                        return newIndent + rest
                     }
-                } else {
-                    const insertion = '  '
-                    const newVal = val.slice(0, start) + insertion + val.slice(end)
-                    textarea.value = newVal
-                    textarea.setSelectionRange(start + 2, start + 2)
-                    textarea.dispatchEvent(new Event('input'))
+                    return ln === '' ? ln : '\t' + ln
+                })
+                const newBlock = newLines.join('\n')
+                textarea.value = val.slice(0, rStart) + newBlock + val.slice(rEnd)
+                let np
+                if (e.shiftKey) np = Math.max(lineStart, start - removedOnFirst)
+                else np = start + 1
+                textarea.setSelectionRange(np, np)
+                // Renumber both the moved item's (new) run and the run it left behind.
+                if (/^[ \t]*\d+[.)] /.test(currentLine)) {
+                    this._renumberRun(textarea, lineStart) // new level run
+                    const afterIdx = rStart + newBlock.length + 1 // first line after moved subtree
+                    if (afterIdx <= textarea.value.length) {
+                        const aStart = textarea.value.lastIndexOf('\n', afterIdx - 1) + 1
+                        this._renumberRun(textarea, aStart) // old sibling run
+                    }
+                    textarea.setSelectionRange(np, np)
                 }
+                textarea.dispatchEvent(new Event('input'))
+                return
+            }
+
+            // Non-list line: insert / remove one tab at line start.
+            if (e.shiftKey) {
+                const { indent, rest } = this._splitIndent(currentLine)
+                const newIndent = this._removeOneLevel(indent)
+                const removed = indent.length - newIndent.length
+                if (removed === 0) return
+                textarea.value = val.slice(0, lineStart) + newIndent + rest + val.slice(lineEnd)
+                const np = Math.max(lineStart, start - removed)
+                textarea.setSelectionRange(np, np)
+                textarea.dispatchEvent(new Event('input'))
+            } else {
+                textarea.value = val.slice(0, lineStart) + '\t' + val.slice(lineStart)
+                textarea.setSelectionRange(start + 1, start + 1)
+                textarea.dispatchEvent(new Event('input'))
             }
             return
         }
 
-        // Auto-close markdown pairs: **, __, ~~, ==, ``
-        if (!e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-            const pairs = { '`': '`', '*': '*', '_': '_', '~': '~', '=': '=' }
-            if (e.key in pairs && start !== end) {
-                // Wrap selection
+        // ── Auto-pairs and wrap-selection ─────────────────────────
+        if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+            const OPEN = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' }
+            const EMPH = { '*': '*', '_': '_', '~': '~', '=': '=' }
+            // Wrap selection with any pair/emphasis char.
+            if (start !== end && (e.key in OPEN || e.key in EMPH)) {
                 e.preventDefault()
+                const close = OPEN[e.key] ?? EMPH[e.key]
                 const selected = val.slice(start, end)
-                const wrapped = e.key + selected + pairs[e.key]
-                textarea.value = val.slice(0, start) + wrapped + val.slice(end)
+                textarea.value = val.slice(0, start) + e.key + selected + close + val.slice(end)
                 textarea.setSelectionRange(start + 1, end + 1)
                 textarea.dispatchEvent(new Event('input'))
                 return
             }
+            // Empty caret: auto-close brackets/quotes only (not emphasis, so ** still works).
+            if (start === end && e.key in OPEN) {
+                e.preventDefault()
+                const close = OPEN[e.key]
+                textarea.value = val.slice(0, start) + e.key + close + val.slice(end)
+                textarea.setSelectionRange(start + 1, start + 1)
+                textarea.dispatchEvent(new Event('input'))
+                return
+            }
+            // Backspace between an adjacent auto-pair removes both chars.
+            if (e.key === 'Backspace' && start === end && start > 0) {
+                const prev = val[start - 1]
+                const next = val[start]
+                if (OPEN[prev] && OPEN[prev] === next) {
+                    e.preventDefault()
+                    textarea.value = val.slice(0, start - 1) + val.slice(start + 1)
+                    textarea.setSelectionRange(start - 1, start - 1)
+                    textarea.dispatchEvent(new Event('input'))
+                    return
+                }
+            }
         }
+    }
+
+    // Indent / outdent every line touched by a multi-line selection, preserving the
+    // selection range. Fenced-code lines inside the selection are left untouched.
+    _indentSelection(textarea, outdent) {
+        const val = textarea.value
+        const start = textarea.selectionStart
+        const end = textarea.selectionEnd
+        const firstLineStart = val.lastIndexOf('\n', start - 1) + 1
+        // If the selection ends exactly at a line start, don't include that empty trailing line.
+        let blockEnd = end
+        if (end > start && val[end - 1] === '\n') blockEnd = end - 1
+        const lastLineEnd = val.indexOf('\n', blockEnd) === -1 ? val.length : val.indexOf('\n', blockEnd)
+        const block = val.slice(firstLineStart, lastLineEnd)
+        const blines = block.split('\n')
+        const mask = this._fenceMask(blines)
+        let deltaFirst = 0, deltaTotal = 0
+        const newLines = blines.map((ln, idx) => {
+            if (mask[idx]) return ln
+            if (outdent) {
+                const { indent, rest } = this._splitIndent(ln)
+                const newIndent = this._removeOneLevel(indent)
+                const d = newIndent.length - indent.length
+                if (idx === 0) deltaFirst = d
+                deltaTotal += d
+                return newIndent + rest
+            }
+            if (ln === '') return ln // don't indent truly empty lines on indent
+            if (idx === 0) deltaFirst = 1
+            deltaTotal += 1
+            return '\t' + ln
+        })
+        textarea.value = val.slice(0, firstLineStart) + newLines.join('\n') + val.slice(lastLineEnd)
+        const newStart = Math.max(firstLineStart, start + deltaFirst)
+        const newEnd = end + deltaTotal
+        textarea.setSelectionRange(newStart, newEnd)
+        textarea.dispatchEvent(new Event('input'))
+    }
+
+    // ── Toggle selected line(s) as bullet / ordered / task list ────
+    _toggleList(textarea, type = 'ul') {
+        const val = textarea.value
+        const selStart = textarea.selectionStart
+        const selEnd = textarea.selectionEnd
+        const firstLineStart = val.lastIndexOf('\n', selStart - 1) + 1
+        const lastLineEnd = val.indexOf('\n', selEnd === selStart ? selEnd : selEnd - 1) === -1
+            ? val.length
+            : val.indexOf('\n', selEnd === selStart ? selEnd : selEnd - 1)
+        const block = val.slice(firstLineStart, lastLineEnd)
+        const blines = block.split('\n')
+        const mask = this._fenceMask(blines)
+        const stripRe = /^([ \t]*)(?:#{1,6} +|>[ \t]?|(?:[-*+]|\d+[.)]) (?:\[[ xX]\] )?)/
+        const typeRe = type === 'ul'
+            ? /^[ \t]*[-*+] (?!\[[ xX]\] )/
+            : type === 'ol'
+                ? /^[ \t]*\d+[.)] (?!\[[ xX]\] )/
+                : /^[ \t]*[-*+] \[[ xX]\] /
+        // Toggle OFF only if every non-blank/non-code line already is this exact type.
+        const relevant = blines.filter((ln, i) => !mask[i] && ln.trim() !== '')
+        const allAreType = relevant.length > 0 && relevant.every(ln => typeRe.test(ln))
+        let counter = 1
+        const newLines = blines.map((ln, idx) => {
+            if (mask[idx] || ln.trim() === '') return ln
+            const { indent } = this._splitIndent(ln)
+            const stripped = ln.replace(stripRe, '$1')
+            const bare = stripped.slice(indent.length)
+            if (allAreType) return indent + bare // toggle off
+            if (type === 'ul') return indent + '- ' + bare
+            if (type === 'ol') return indent + (counter++) + '. ' + bare
+            return indent + '- [ ] ' + bare
+        })
+        textarea.value = val.slice(0, firstLineStart) + newLines.join('\n') + val.slice(lastLineEnd)
+        const newEnd = firstLineStart + newLines.join('\n').length
+        textarea.setSelectionRange(firstLineStart, newEnd)
+        textarea.dispatchEvent(new Event('input'))
+    }
+
+    // Toggle the done state of any task line(s) in the selection.
+    _toggleDone(textarea) {
+        const val = textarea.value
+        const selStart = textarea.selectionStart
+        const selEnd = textarea.selectionEnd
+        const firstLineStart = val.lastIndexOf('\n', selStart - 1) + 1
+        const lastLineEnd = val.indexOf('\n', selEnd === selStart ? selEnd : selEnd - 1) === -1
+            ? val.length
+            : val.indexOf('\n', selEnd === selStart ? selEnd : selEnd - 1)
+        const block = val.slice(firstLineStart, lastLineEnd)
+        const blines = block.split('\n')
+        const taskRe = /^([ \t]*[-*+] \[)([ xX])(\] )/
+        const tasks = blines.filter(ln => taskRe.test(ln))
+        if (tasks.length === 0) return
+        const allDone = tasks.every(ln => taskRe.exec(ln)[2].toLowerCase() === 'x')
+        const newLines = blines.map(ln => {
+            const m = ln.match(taskRe)
+            if (!m) return ln
+            return m[1] + (allDone ? ' ' : 'x') + m[3] + ln.slice(m[0].length)
+        })
+        const caret = textarea.selectionStart
+        textarea.value = val.slice(0, firstLineStart) + newLines.join('\n') + val.slice(lastLineEnd)
+        textarea.setSelectionRange(caret, caret)
+        textarea.dispatchEvent(new Event('input'))
     }
 
     // ── Smart paste: URL over selection → link ────────────────
@@ -2935,6 +3322,7 @@ export class ThoughtCollector {
         const close = () => {
             if (dropdown) { dropdown.remove(); dropdown = null }
             candidates = []
+            this._wikilinkOpen = false
         }
 
         const show = (query) => {
@@ -2962,6 +3350,7 @@ export class ThoughtCollector {
             dropdown.style.top = `${Math.min(top, window.innerHeight - 200)}px`
             dropdown.style.left = `${Math.min(left, window.innerWidth - 260)}px`
 
+            this._wikilinkOpen = true
             render()
         }
 
@@ -3725,13 +4114,12 @@ export class ThoughtCollector {
 
     // ── Render preview with source line tracking ──────────────
     _renderPreview(previewEl, markdown) {
-        let normalised = this._normaliseMath(markdown || '')
-        normalised = this._preprocessMarkdown(normalised)
-
+        // _mdToHtml runs indent normalization FIRST (on pure markdown, before any
+        // HTML injection), then math + Obsidian preprocessing, then marked.
         if (typeof marked !== 'undefined') {
-            previewEl.innerHTML = marked.parse(normalised)
+            previewEl.innerHTML = this._mdToHtml(markdown || '')
         } else {
-            previewEl.textContent = normalised
+            previewEl.textContent = markdown || ''
         }
 
         // Make checkboxes interactive (GFM task lists)
@@ -3813,7 +4201,7 @@ export class ThoughtCollector {
                     if (!file.contentLoaded && file.path) {
                         content = await vaultAPI.readFile(file.path)
                     }
-                    const embedHtml = typeof marked !== 'undefined' ? marked.parse(content) : content
+                    const embedHtml = typeof marked !== 'undefined' ? this._mdToHtml(content) : content
                     block.innerHTML = `<div class="embed-content"><div class="embed-title">${this._esc(file.title)}</div>${embedHtml}</div>`
                 } catch {
                     block.innerHTML = `<div class="embed-error">Could not load: ${this._esc(target)}</div>`
