@@ -8,3 +8,6 @@ serviceAccount.json
 __pycache__/
 *.pyc
 .venv/
+
+# Local Supabase backup (user data)
+supabase-backup/

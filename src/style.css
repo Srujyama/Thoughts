@@ -2064,6 +2064,45 @@ body {
     margin-top: 0.25rem;
 }
 
+/* ── "or" divider + Google sign-in button ────────────────────── */
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.5rem 0;
+    color: var(--nc-text-dim);
+    font-size: 0.75rem;
+    opacity: 0.6;
+}
+.auth-divider::before,
+.auth-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--t-divider-color, var(--nc-red-dim));
+}
+
+.google-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    width: 100%;
+    background: #ffffff;
+    color: #1f1f1f;
+    font-weight: 500;
+}
+.google-btn:hover:not(:disabled) {
+    background: #f3f3f3;
+}
+.google-btn .google-icon {
+    flex: 0 0 auto;
+}
+.google-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
 .link-btn {
     background: none;
     border: none;

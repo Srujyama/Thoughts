@@ -166,7 +166,14 @@ def migrate_thoughts(dry_run: bool):
 
     rows, start = [], 0
     while True:
-        resp = sb.table("thoughts").select("*").range(start, start + 999).execute()
+        try:
+            resp = sb.table("thoughts").select("*").range(start, start + 999).execute()
+        except Exception as e:
+            # The thoughts table may not exist (feature was never populated) — skip cleanly.
+            if "PGRST205" in str(e) or "Could not find the table" in str(e):
+                print("[thoughts] no 'thoughts' table in Supabase — skipping (nothing to migrate)")
+                return
+            raise
         batch = resp.data or []
         rows.extend(batch)
         if len(batch) < 1000:

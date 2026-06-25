@@ -155,6 +155,18 @@ export const auth = {
         return data
     },
 
+    // Google sign-in via the Firebase JS SDK. Produces a Firebase ID token that
+    // the backend verifies exactly like an email/password token.
+    async loginWithGoogle() {
+        const { signInWithGoogle } = await import('./firebase.js')
+        const { idToken, refreshToken, uid, email } = await signInWithGoogle()
+        localStorage.setItem(TOKEN_KEY, idToken)
+        if (refreshToken) localStorage.setItem(REFRESH_KEY, refreshToken)
+        localStorage.setItem(USER_KEY, JSON.stringify({ user_id: uid, email }))
+        _scheduleProactiveRefresh()
+        return { user_id: uid, email }
+    },
+
     // Call on app load to start proactive refresh cycle
     startRefreshCycle() {
         _scheduleProactiveRefresh()
