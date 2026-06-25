@@ -1,0 +1,16 @@
+# Never bake secrets or local-only data into the image.
+.env
+.env.supabase
+serviceAccount.json
+*serviceAccount*.json
+supabase-backup/
+
+# Local dev cruft
+.venv/
+__pycache__/
+*.pyc
+.gitignore
+FIREBASE_MIGRATION.md
+migrate_to_firebase.py
+firebase.json
+firestore.indexes.json
