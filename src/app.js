@@ -3509,54 +3509,72 @@ export class ThoughtCollector {
     // ── PDF Export ────────────────────────────────────────────
     _exportPDF(title, previewEl) {
         const printWindow = window.open('', '_blank')
-        const currentTheme = document.documentElement.getAttribute('data-theme') || 'cyberpunk'
-        // Get computed styles for the preview
-        const previewStyle = getComputedStyle(previewEl)
+        if (!printWindow) {
+            alert('Popup blocked — allow popups for this site to export PDFs.')
+            return
+        }
+        const theme = document.documentElement.getAttribute('data-theme') || 'cyberpunk'
+        // Carry the app's stylesheets into the print document (theme variables,
+        // .editor-preview rules, hljs token colors, KaTeX, fonts) so the export
+        // matches the live preview under the active theme.
+        const headAssets = Array.from(
+            document.querySelectorAll('head style, head link[rel="stylesheet"], head link[rel="preconnect"]')
+        ).map(n => n.outerHTML).join('\n')
 
         printWindow.document.write(`
 <!DOCTYPE html>
-<html>
+<html data-theme="${theme}">
 <head>
     <meta charset="UTF-8">
     <title>${this._esc(title)}</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    ${headAssets}
     <style>
-        body {
-            font-family: ${previewStyle.fontFamily};
-            font-size: 14px;
-            line-height: 1.8;
-            color: #000;
-            background: #fff;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 40px;
-        }
-        h1, h2, h3, h4, h5, h6 { color: #111; margin: 1.5rem 0 0.75rem; }
-        h2 { border-bottom: 1px solid #ccc; padding-bottom: 0.4rem; }
-        p { margin: 0.75rem 0; }
-        strong { font-weight: bold; }
-        em { font-style: italic; }
-        a { color: #1a73e8; }
-        code { background: #f5f5f5; padding: 0.1em 0.4em; font-family: 'Courier New', monospace; font-size: 0.9em; border: 1px solid #ddd; border-radius: 3px; }
-        pre { background: #f5f5f5; border: 1px solid #ddd; padding: 1rem; overflow-x: auto; }
-        pre code { background: none; border: none; padding: 0; }
-        blockquote { border-left: 3px solid #999; padding-left: 1rem; color: #555; margin: 1rem 0; }
-        ul, ol { padding-left: 1.5rem; margin: 0.75rem 0; }
-        li { margin: 0.3rem 0; }
-        hr { border: none; border-top: 1px solid #ccc; margin: 1.5rem 0; }
-        table { border-collapse: collapse; width: 100%; }
-        th { background: #f5f5f5; padding: 0.5rem 0.75rem; border: 1px solid #ddd; text-align: left; }
-        td { padding: 0.5rem 0.75rem; border: 1px solid #ddd; }
-        .task-list-item { list-style: none; }
-        .task-list-item input[type="checkbox"] { margin-right: 0.4em; }
-        h1.pdf-title { font-size: 2rem; border-bottom: 2px solid #333; padding-bottom: 0.5rem; margin-bottom: 2rem; }
-        @media print { body { padding: 20px; } }
+        /* Zero page margin suppresses the browser's printed headers/footers
+           (date, title, URL, page numbers). Real page margins come from the
+           .print-layout table below — its thead/tfoot repeat on every page. */
+        @page { margin: 0; }
+        * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        html, body { margin: 0; padding: 0; overflow: visible; }
+        html { background: var(--t-body-bg, #fff); }
+        /* Scanline/noise overlays don't belong on paper */
+        body::before, body::after { display: none !important; }
+        table.print-layout { width: 100%; border-collapse: collapse; }
+        table.print-layout > thead > tr > td,
+        table.print-layout > tbody > tr > td,
+        table.print-layout > tfoot > tr > td { border: none; padding: 0; background: none; }
+        .page-margin { height: 15mm; }
+        /* The content div carries .editor-preview so every theme rule applies;
+           strip only its on-screen panel chrome (border, box bg, scroll) */
+        .pdf-content { max-width: 800px; margin: 0 auto; padding: 0 18mm; border: none; background: transparent; border-radius: 0; overflow: visible; }
+        .pdf-content h1, .pdf-content h2, .pdf-content h3,
+        .pdf-content h4, .pdf-content h5, .pdf-content h6 { break-after: avoid; }
+        .pdf-content pre { break-inside: avoid; white-space: pre-wrap; word-wrap: break-word; overflow-x: visible; }
+        .pdf-content blockquote, .pdf-content table,
+        .pdf-content .katex-display, .pdf-content .mermaid { break-inside: avoid; }
+        h1.pdf-title { font-size: 2rem; border-bottom-width: 2px; border-bottom-style: solid; padding-bottom: 0.5rem; margin-bottom: 2rem; }
     </style>
 </head>
 <body>
-    <h1 class="pdf-title">${this._esc(title)}</h1>
-    ${previewEl.innerHTML}
-    <script>window.onload = function() { window.print(); }<\/script>
+    <table class="print-layout">
+        <thead><tr><td><div class="page-margin"></div></td></tr></thead>
+        <tbody><tr><td>
+            <div class="editor-preview pdf-content">
+                <h1 class="pdf-title">${this._esc(title)}</h1>
+                ${previewEl.innerHTML}
+            </div>
+        </td></tr></tbody>
+        <tfoot><tr><td><div class="page-margin"></div></td></tr></tfoot>
+    </table>
+    <script>
+        window.onload = function() {
+            var go = function() { window.print(); };
+            // Wait for web fonts so printing doesn't race font loading
+            if (document.fonts && document.fonts.ready) {
+                document.fonts.ready.then(function() { setTimeout(go, 100); });
+            } else { go(); }
+        };
+        window.onafterprint = function() { window.close(); };
+    <\/script>
 </body>
 </html>
         `)
