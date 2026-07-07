@@ -23,10 +23,9 @@ function showAuthView() {
 }
 
 function showAppView() {
-    // Start proactive token refresh cycle immediately (non-blocking)
-    auth.startRefreshCycle()
-    // Refresh token + re-check sync when the tab returns to the foreground or
-    // the network comes back — background timers get suspended on mobile.
+    // Re-check sync when the tab returns to the foreground or the network
+    // comes back — background timers get suspended on mobile. (Auth token
+    // refresh is handled inside the Firebase SDK.)
     enableMobileRefreshHandlers()
     new ThoughtCollector(appEl, () => showAuthView())
 }

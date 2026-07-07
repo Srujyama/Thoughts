@@ -1,15 +1,18 @@
 // src/firebase.js
-// Firebase JS SDK init for client-side Google sign-in. The resulting Firebase
-// ID token is sent to the FastAPI backend (Authorization: Bearer), which already
-// verifies any Firebase token via the Admin SDK — so the backend needs no change.
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'
+// Firebase initialization — the browser talks to Firebase Auth, Firestore, and
+// Cloud Storage directly; security rules (firestore.rules / storage.rules)
+// enforce per-user access. There is no application server.
+import { initializeApp } from 'firebase/app'
 import {
     getAuth,
     GoogleAuthProvider,
     signInWithPopup,
     setPersistence,
     browserLocalPersistence,
-} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js'
+    onAuthStateChanged,
+} from 'firebase/auth'
+import { getFirestore } from 'firebase/firestore'
+import { getStorage } from 'firebase/storage'
 
 // Public Firebase web config (safe to ship — these identify the project, they're
 // not secrets). Values come from the thoughts-vault project.
@@ -22,24 +25,27 @@ const firebaseConfig = {
 }
 
 const app = initializeApp(firebaseConfig)
-const fbAuth = getAuth(app)
-// Keep the Firebase session in localStorage so refresh works across reloads.
+
+export const fbAuth = getAuth(app)
+export const db = getFirestore(app)
+export const storage = getStorage(app)
+
+// Keep the Firebase session in localStorage so it survives reloads.
 setPersistence(fbAuth, browserLocalPersistence).catch(() => {})
+
+// Resolves once the SDK finishes restoring any persisted session — with the
+// signed-in user, or null if there isn't one. Await this before assuming the
+// user is signed out: restoration is asynchronous on page load.
+export const authReady = new Promise(resolve => {
+    const unsubscribe = onAuthStateChanged(fbAuth, user => {
+        unsubscribe()
+        resolve(user)
+    })
+})
 
 const googleProvider = new GoogleAuthProvider()
 
 export async function signInWithGoogle() {
     const result = await signInWithPopup(fbAuth, googleProvider)
-    const user = result.user
-    const idToken = await user.getIdToken()
-    // Firebase manages the refresh token internally; we hand it to the app layer
-    // so it can refresh through the same securetoken endpoint the backend uses.
-    return {
-        idToken,
-        refreshToken: user.refreshToken,
-        uid: user.uid,
-        email: user.email,
-    }
+    return result.user
 }
-
-export { fbAuth }

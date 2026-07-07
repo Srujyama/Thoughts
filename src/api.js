@@ -1,10 +1,27 @@
 // src/api.js
-// All calls go to the FastAPI backend. JWT stored in localStorage.
+// All data operations go straight to Firebase — Auth for sessions, Firestore
+// for thoughts, Cloud Storage for vault files. Security rules enforce access;
+// there is no application server.
 
-const BASE_URL    = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-const TOKEN_KEY   = 'nc_token'
-const REFRESH_KEY = 'nc_refresh_token'
-const USER_KEY    = 'nc_user'
+import {
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    signOut,
+} from 'firebase/auth'
+import {
+    collection, query, where, orderBy, getDocs,
+    addDoc, getDoc, deleteDoc, doc, serverTimestamp,
+} from 'firebase/firestore'
+import {
+    ref, listAll, getMetadata, getBytes, uploadString, deleteObject,
+} from 'firebase/storage'
+import { fbAuth, db, storage, authReady } from './firebase.js'
+
+const USER_KEY = 'nc_user'
+
+// Legacy keys from the FastAPI-backend era — clear stale JWTs.
+localStorage.removeItem('nc_token')
+localStorage.removeItem('nc_refresh_token')
 
 // ── Session-expired callback (set by main.js to redirect to login) ──
 let _onSessionExpired = null
@@ -13,219 +30,194 @@ export function setSessionExpiredHandler(handler) {
     _onSessionExpired = handler
 }
 
-// ── Token refresh (runs at most once at a time) ───────────────
-let _refreshPromise = null
-let _refreshTimer = null
-
-// Parse JWT to read expiry without a library
-function _parseJwtExp(token) {
-    try {
-        const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
-        return payload.exp || 0
-    } catch { return 0 }
-}
-
-// Schedule a proactive refresh ~60s before the access token expires
-function _scheduleProactiveRefresh() {
-    if (_refreshTimer) clearTimeout(_refreshTimer)
-    const token = localStorage.getItem(TOKEN_KEY)
-    if (!token) return
-
-    const exp = _parseJwtExp(token)
-    if (!exp) return
-
-    const nowSec = Math.floor(Date.now() / 1000)
-    const ttl = exp - nowSec
-    // Refresh 60 seconds before expiry (minimum 10s from now)
-    const delay = Math.max((ttl - 60) * 1000, 10_000)
-
-    _refreshTimer = setTimeout(async () => {
-        try {
-            if (!_refreshPromise) {
-                _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
-            }
-            await _refreshPromise
-        } catch {
-            // Proactive refresh failed — user will be prompted on next request
-        }
-    }, delay)
-}
-
-function _handleSessionExpired() {
-    localStorage.removeItem(TOKEN_KEY)
-    localStorage.removeItem(REFRESH_KEY)
+function _sessionExpired() {
     localStorage.removeItem(USER_KEY)
-    if (_refreshTimer) clearTimeout(_refreshTimer)
-    if (_onSessionExpired) {
-        _onSessionExpired()
-    }
+    if (_onSessionExpired) _onSessionExpired()
 }
 
-async function _refreshToken() {
-    const refreshToken = localStorage.getItem(REFRESH_KEY)
-    if (!refreshToken) {
-        _handleSessionExpired()
-        throw new Error('__SESSION_EXPIRED__')
+// When the SDK finishes restoring the persisted session: if the app thought it
+// was signed in but Firebase says otherwise, the session is gone — kick to login.
+authReady.then(user => {
+    if (user) {
+        localStorage.setItem(USER_KEY, JSON.stringify({ user_id: user.uid, email: user.email }))
+    } else if (localStorage.getItem(USER_KEY)) {
+        _sessionExpired()
     }
+})
 
-    const res = await fetch(`${BASE_URL}/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-    })
-    if (!res.ok) {
-        _handleSessionExpired()
-        throw new Error('__SESSION_EXPIRED__')
-    }
-    const data = await res.json()
-    localStorage.setItem(TOKEN_KEY, data.access_token)
-    if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
-    // Schedule the next proactive refresh
-    _scheduleProactiveRefresh()
-    return data.access_token
+// Wait for the restored session and return the signed-in user, or throw.
+// Token refresh is handled inside the SDK — no manual JWT machinery needed.
+async function _requireUser() {
+    if (fbAuth.currentUser) return fbAuth.currentUser
+    await authReady
+    if (fbAuth.currentUser) return fbAuth.currentUser
+    const err = new Error('Session expired. Please log in again.')
+    err.status = 401
+    _sessionExpired()
+    throw err
 }
 
-// ── Internal fetch helper ─────────────────────────────────────
-
-async function apiFetch(path, options = {}, _retry = true) {
-    const token = localStorage.getItem(TOKEN_KEY)
-    const headers = { 'Content-Type': 'application/json', ...options.headers }
-    if (token) headers['Authorization'] = `Bearer ${token}`
-
-    const res = await fetch(`${BASE_URL}${path}`, { ...options, headers })
-
-    if (res.status === 204) return null
-
-    // Auto-refresh on 401 then retry once
-    if (res.status === 401 && _retry) {
-        if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
-        try {
-            await _refreshPromise
-        } catch (err) {
-            if (err.message === '__SESSION_EXPIRED__') return null
-            throw err
-        }
-        return apiFetch(path, options, false)
+// Map Firebase Auth error codes to the messages the login UI expects.
+function _friendlyAuthError(err) {
+    const code = (err && err.code) || ''
+    const messages = {
+        'auth/email-already-in-use': 'An account with this email already exists',
+        'auth/invalid-credential': 'Invalid email or password',
+        'auth/wrong-password': 'Invalid email or password',
+        'auth/user-not-found': 'Invalid email or password',
+        'auth/invalid-email': 'Invalid email address',
+        'auth/weak-password': 'Password is too weak (minimum 6 characters)',
+        'auth/user-disabled': 'This account has been disabled',
+        'auth/too-many-requests': 'Too many attempts — try again in a few minutes',
+        'auth/network-request-failed': 'Network error — check your connection',
     }
+    if (!messages[code]) return err
+    const friendly = new Error(messages[code])
+    friendly.code = code
+    if (code === 'auth/email-already-in-use') friendly.status = 409
+    return friendly
+}
 
-    const data = await res.json().catch(() => null)
-
-    if (!res.ok) {
-        const msg = data?.detail || `HTTP ${res.status}`
-        const err = new Error(Array.isArray(msg) ? msg.map(e => e.msg).join(', ') : msg)
-        err.status = res.status
-        throw err
-    }
-
-    return data
+function _storeUser(user) {
+    const info = { user_id: user.uid, email: user.email }
+    localStorage.setItem(USER_KEY, JSON.stringify(info))
+    return info
 }
 
 // ── Auth ──────────────────────────────────────────────────────
 
 export const auth = {
-    isAuthed: () => !!localStorage.getItem(TOKEN_KEY),
-
-    getToken: () => localStorage.getItem(TOKEN_KEY),
+    // Synchronous hint for instant boot; the SDK restores the real session in
+    // the background and the authReady check above corrects any mismatch.
+    isAuthed: () => !!localStorage.getItem(USER_KEY),
 
     getUser: () => {
         try { return JSON.parse(localStorage.getItem(USER_KEY)) } catch { return null }
     },
 
     async login(email, password) {
-        const data = await apiFetch('/auth/login', {
-            method: 'POST',
-            body: JSON.stringify({ email, password }),
-        })
-        localStorage.setItem(TOKEN_KEY, data.access_token)
-        if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
-        localStorage.setItem(USER_KEY, JSON.stringify({ user_id: data.user_id, email: data.email }))
-        _scheduleProactiveRefresh()
-        return data
+        try {
+            const cred = await signInWithEmailAndPassword(fbAuth, email, password)
+            return _storeUser(cred.user)
+        } catch (err) { throw _friendlyAuthError(err) }
     },
 
     async signup(email, password) {
-        const data = await apiFetch('/auth/signup', {
-            method: 'POST',
-            body: JSON.stringify({ email, password }),
-        })
-        localStorage.setItem(TOKEN_KEY, data.access_token)
-        if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token)
-        localStorage.setItem(USER_KEY, JSON.stringify({ user_id: data.user_id, email: data.email }))
-        _scheduleProactiveRefresh()
-        return data
+        try {
+            const cred = await createUserWithEmailAndPassword(fbAuth, email, password)
+            return _storeUser(cred.user)
+        } catch (err) { throw _friendlyAuthError(err) }
     },
 
-    // Google sign-in via the Firebase JS SDK. Produces a Firebase ID token that
-    // the backend verifies exactly like an email/password token.
     async loginWithGoogle() {
         const { signInWithGoogle } = await import('./firebase.js')
-        const { idToken, refreshToken, uid, email } = await signInWithGoogle()
-        localStorage.setItem(TOKEN_KEY, idToken)
-        if (refreshToken) localStorage.setItem(REFRESH_KEY, refreshToken)
-        localStorage.setItem(USER_KEY, JSON.stringify({ user_id: uid, email }))
-        _scheduleProactiveRefresh()
-        return { user_id: uid, email }
-    },
-
-    // Call on app load to start proactive refresh cycle
-    startRefreshCycle() {
-        _scheduleProactiveRefresh()
+        const user = await signInWithGoogle()
+        return _storeUser(user)
     },
 
     async logout() {
-        if (_refreshTimer) clearTimeout(_refreshTimer)
-        try { await apiFetch('/auth/logout', { method: 'POST' }) } catch { /* no-op */ }
-        localStorage.removeItem(TOKEN_KEY)
-        localStorage.removeItem(REFRESH_KEY)
+        try { await signOut(fbAuth) } catch { /* no-op */ }
         localStorage.removeItem(USER_KEY)
     },
 }
 
 // ── Thoughts API ──────────────────────────────────────────────
 
+const THOUGHTS = 'thoughts'
+
+function _thoughtFromDoc(snap) {
+    const data = snap.data() || {}
+    return {
+        id: snap.id,
+        text: data.text || '',
+        created_at: data.created_at?.toDate?.().toISOString() ?? null,
+        user_id: data.user_id || '',
+    }
+}
+
 export const thoughtsAPI = {
-    list: ()            => apiFetch('/thoughts'),
-    create: (text)      => apiFetch('/thoughts', { method: 'POST', body: JSON.stringify({ text }) }),
-    delete: (thoughtId) => apiFetch(`/thoughts/${thoughtId}`, { method: 'DELETE' }),
+    async list() {
+        const user = await _requireUser()
+        const snap = await getDocs(query(
+            collection(db, THOUGHTS),
+            where('user_id', '==', user.uid),
+            orderBy('created_at', 'desc'),
+        ))
+        const thoughts = snap.docs.map(_thoughtFromDoc)
+        return { thoughts, count: thoughts.length }
+    },
+
+    async create(text) {
+        const user = await _requireUser()
+        const docRef = await addDoc(collection(db, THOUGHTS), {
+            text: text.trim(),
+            user_id: user.uid,
+            created_at: serverTimestamp(),
+        })
+        return _thoughtFromDoc(await getDoc(docRef))
+    },
+
+    async delete(thoughtId) {
+        await _requireUser()
+        await deleteDoc(doc(db, THOUGHTS, thoughtId))  // rules enforce ownership
+        return null
+    },
 }
 
 // ── Vault / Files API ─────────────────────────────────────────
 // Files are stored as: {folderPath}/{title}.md  (folderPath can be nested: a/b/c)
-// Folder list is derived from the file paths returned by the API.
+// In Cloud Storage each object lives at "{uid}/{relative_path}"; storage.rules
+// limit every user to their own prefix.
+
+function _fileRef(user, path) {
+    return ref(storage, `${user.uid}/${path}`)
+}
 
 export const vaultAPI = {
     // Returns raw flat list: [{ path, updated_at, size }, ...]
-    listFiles: () => apiFetch('/vault/files'),
-
-    // Returns file content as text (goes through apiFetch for auto-refresh)
-    async readFile(path) {
-        const doRead = async () => {
-            const token = localStorage.getItem(TOKEN_KEY)
-            return fetch(`${BASE_URL}/vault/files/${path}`, {
-                headers: { Authorization: `Bearer ${token}` },
+    async listFiles() {
+        const user = await _requireUser()
+        const prefixLen = user.uid.length + 1
+        const files = []
+        const walk = async (dirRef) => {
+            const page = await listAll(dirRef)
+            const metas = await Promise.all(page.items.map(item => getMetadata(item).catch(() => null)))
+            page.items.forEach((item, i) => {
+                files.push({
+                    path: item.fullPath.slice(prefixLen),
+                    updated_at: metas[i] ? metas[i].updated : null,
+                    size: metas[i] ? Number(metas[i].size) : null,
+                })
             })
+            await Promise.all(page.prefixes.map(walk))
         }
-        let res = await doRead()
-        if (res.status === 401) {
-            if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
-            try {
-                await _refreshPromise
-            } catch (err) {
-                if (err.message === '__SESSION_EXPIRED__') return ''
-                throw err
-            }
-            res = await doRead()
-        }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        return res.text()
+        await walk(ref(storage, user.uid))
+        return files
     },
 
-    writeFile: (path, content) => apiFetch(`/vault/files/${path}`, {
-        method: 'PUT',
-        body: JSON.stringify({ path, content }),
-    }),
+    // Returns file content as text
+    async readFile(path) {
+        const user = await _requireUser()
+        const bytes = await getBytes(_fileRef(user, path))
+        return new TextDecoder().decode(bytes)
+    },
 
-    deleteFile: (path) => apiFetch(`/vault/files/${path}`, { method: 'DELETE' }),
+    async writeFile(path, content) {
+        const user = await _requireUser()
+        await uploadString(_fileRef(user, path), content, 'raw', { contentType: 'text/markdown' })
+        return { path, bytes: content.length }
+    },
+
+    async deleteFile(path) {
+        const user = await _requireUser()
+        try {
+            await deleteObject(_fileRef(user, path))
+        } catch (err) {
+            if (err && err.code === 'storage/object-not-found') return null  // idempotent
+            throw err
+        }
+        return null
+    },
 }
 
 // ── Folders + Files abstraction ────────────────────────────────
@@ -665,34 +657,28 @@ export const syncStatus = {
     },
 
     async check() {
-        const token = localStorage.getItem(TOKEN_KEY)
-        if (!token) { syncStatus._set('expired'); return }
-
-        // Check if token is expired locally first
-        const exp = _parseJwtExp(token)
-        const nowSec = Math.floor(Date.now() / 1000)
-        if (exp && exp < nowSec) {
-            // Try refreshing
-            try {
-                if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
-                await _refreshPromise
-            } catch {
-                syncStatus._set('expired')
-                return
-            }
-        }
+        if (!auth.isAuthed()) { syncStatus._set('expired'); return }
 
         syncStatus._set('checking')
+        let user = fbAuth.currentUser
+        if (!user) user = await authReady
+        if (!user) { syncStatus._set('expired'); return }
+
         try {
-            const res = await fetch(`${BASE_URL}/vault/files`, {
-                headers: { Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}` },
-            })
+            // Reachability + session probe: list at most one object from the
+            // user's Storage prefix with a fresh ID token. The SDK refreshes
+            // the token automatically if it's stale.
+            const token = await user.getIdToken()
+            const bucket = storage.app.options.storageBucket
+            const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o` +
+                `?prefix=${encodeURIComponent(user.uid + '/')}&maxResults=1`
+            const res = await fetch(url, { headers: { Authorization: `Firebase ${token}` } })
             if (res.ok) {
                 syncStatus._set('synced')
                 // Connection is back — drain any saves queued while offline
                 if (offlineQueue.getPending().length) offlineQueue.flush().catch(() => {})
             }
-            else if (res.status === 401) syncStatus._set('expired')
+            else if (res.status === 401 || res.status === 403) syncStatus._set('expired')
             else syncStatus._set('offline')
         } catch {
             syncStatus._set('offline')
@@ -710,9 +696,8 @@ export const syncStatus = {
     },
 }
 
-// Update sync status on successful/failed API calls
-const _origApiFetch = apiFetch
-// We patch the internal flow by hooking into listFromCloud success/failure
+// Update sync status on successful/failed cloud syncs by hooking into
+// listFromCloud success/failure
 const _origListFromCloud = foldersAPI.listFromCloud.bind(foldersAPI)
 foldersAPI.listFromCloud = async function () {
     try {
@@ -720,7 +705,7 @@ foldersAPI.listFromCloud = async function () {
         syncStatus._set('synced')
         return result
     } catch (err) {
-        if (err.message === '__SESSION_EXPIRED__') syncStatus._set('expired')
+        if (err.status === 401) syncStatus._set('expired')
         else syncStatus._set('offline')
         throw err
     }
@@ -773,41 +758,24 @@ export const offlineQueue = {
 }
 
 // ── Mobile foreground / network refresh ───────────────────────
-// Background tabs on mobile have their setTimeout/setInterval suspended, so the
-// proactive refresh + 60s sync poll stop firing. Re-sync on foreground & online.
+// Background tabs on mobile have their timers suspended, so the 60s sync poll
+// stops firing. Re-sync on foreground & online. (Token refresh needs no timers:
+// the Firebase SDK refreshes ID tokens lazily whenever they're used.)
 let _mobileHandlersEnabled = false
 
 export function enableMobileRefreshHandlers() {
     if (_mobileHandlersEnabled) return  // register exactly once per session
     _mobileHandlersEnabled = true
 
-    const refreshIfStale = async () => {
-        const token = localStorage.getItem(TOKEN_KEY)
-        if (!token) return
-        const exp = _parseJwtExp(token)
-        const nowSec = Math.floor(Date.now() / 1000)
-        if (exp && exp - nowSec < 120) {
-            try {
-                if (!_refreshPromise) _refreshPromise = _refreshToken().finally(() => { _refreshPromise = null })
-                await _refreshPromise
-            } catch { /* will be retried on next request */ }
-        }
-        // Re-arm the proactive timer that may have been suspended in the background
-        _scheduleProactiveRefresh()
-    }
-
-    document.addEventListener('visibilitychange', async () => {
+    document.addEventListener('visibilitychange', () => {
         if (document.hidden) return
-        await refreshIfStale()
         syncStatus.check()
         offlineQueue.flush().then(n => { if (n) syncStatus.check() }).catch(() => {})
     })
 
     window.addEventListener('online', async () => {
-        await refreshIfStale()
-        const n = await offlineQueue.flush().catch(() => 0)
+        await offlineQueue.flush().catch(() => 0)
         syncStatus.check()
-        return n
     })
 
     window.addEventListener('offline', () => syncStatus._set('offline'))
