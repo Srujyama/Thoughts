@@ -173,6 +173,20 @@ function _fileRef(user, path) {
     return ref(storage, `${user.uid}/${path}`)
 }
 
+// Reject if a promise doesn't settle within `ms`, so a stalled network call
+// can't leave the UI spinning forever.
+function _withTimeout(promise, ms, message = 'Request timed out') {
+    let timer
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            const err = new Error(message)
+            err.code = 'app/timeout'
+            reject(err)
+        }, ms)
+    })
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
 export const vaultAPI = {
     // Returns raw flat list: [{ path, updated_at, size }, ...]
     async listFiles() {
@@ -195,11 +209,23 @@ export const vaultAPI = {
         return files
     },
 
-    // Returns file content as text
+    // Returns file content as text.
+    // A missing object resolves to '' (a freshly-created file whose upload
+    // hasn't propagated yet is not an error — it's just empty). The read is
+    // also bounded by a timeout so a stalled request can't hang the UI forever.
     async readFile(path) {
         const user = await _requireUser()
-        const bytes = await getBytes(_fileRef(user, path))
-        return new TextDecoder().decode(bytes)
+        try {
+            const bytes = await _withTimeout(
+                getBytes(_fileRef(user, path)),
+                15000,
+                `Timed out reading ${path}`,
+            )
+            return new TextDecoder().decode(bytes)
+        } catch (err) {
+            if (err && err.code === 'storage/object-not-found') return ''
+            throw err
+        }
     },
 
     async writeFile(path, content) {

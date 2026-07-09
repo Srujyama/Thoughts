@@ -1735,7 +1735,17 @@ export class ThoughtCollector {
                         this._renderEditor()
                     }
                 })
-                .catch(err => this._toast(`Load error: ${err.message}`))
+                .catch(err => {
+                    // Never leave the editor stuck on "Loading file...". Fall back
+                    // to whatever content we have (empty for a new/unwritten file)
+                    // so the user can read and edit instead of staring at a spinner.
+                    if (this.view === 'editor' && this.currentFile.id === file.id) {
+                        this.currentFile.content = this.currentFile.content || ''
+                        this.currentFile.contentLoaded = true
+                        this._renderEditor()
+                    }
+                    this._toast(`Load error: ${err.message}`)
+                })
         }
     }
 
