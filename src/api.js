@@ -1,7 +1,7 @@
 // src/api.js
-// All data operations go straight to Firebase — Auth for sessions, Firestore
-// for thoughts, Cloud Storage for vault files. Security rules enforce access;
-// there is no application server.
+// All data operations go straight to Firebase — Auth for sessions and Cloud
+// Storage for vault files. Security rules enforce access; there is no
+// application server.
 
 import {
     signInWithEmailAndPassword,
@@ -9,15 +9,13 @@ import {
     signOut,
 } from 'firebase/auth'
 import {
-    collection, query, where, orderBy, getDocs,
-    addDoc, getDoc, deleteDoc, doc, serverTimestamp,
-} from 'firebase/firestore'
-import {
-    ref, listAll, getMetadata, getBytes, uploadString, deleteObject,
+    ref, listAll, getMetadata, uploadString, deleteObject,
 } from 'firebase/storage'
-import { fbAuth, db, storage, authReady } from './firebase.js'
+import { fbAuth, storage, authReady, signInWithGoogle } from './firebase.js'
+import { contentCache } from './cache.js'
 
 const USER_KEY = 'nc_user'
+const MAX_NOTE_BYTES = 5 * 1024 * 1024
 
 // Legacy keys from the FastAPI-backend era — clear stale JWTs.
 localStorage.removeItem('nc_token')
@@ -35,11 +33,26 @@ function _sessionExpired() {
     if (_onSessionExpired) _onSessionExpired()
 }
 
+// Point the content cache at the right account as soon as we know who it is,
+// so a warm() at boot can only ever surface this user's notes.
+const _cachedUser = (() => {
+    try { return JSON.parse(localStorage.getItem(USER_KEY)) } catch { return null }
+})()
+if (_cachedUser && _cachedUser.user_id) contentCache.setUser(_cachedUser.user_id)
+
 // When the SDK finishes restoring the persisted session: if the app thought it
 // was signed in but Firebase says otherwise, the session is gone — kick to login.
 authReady.then(user => {
     if (user) {
+        contentCache.setUser(user.uid)
         localStorage.setItem(USER_KEY, JSON.stringify({ user_id: user.uid, email: user.email }))
+        // Warm the ID token now. Tokens live an hour, so the common "opened my
+        // laptop the next morning" visit needs a securetoken round-trip — and
+        // without this it happens *inside* the first vault listing, serialized
+        // in front of it. Warming here overlaps it with bundle execution and
+        // the first layout pass. Free when the token is still fresh: the SDK
+        // answers from cache without issuing a request.
+        user.getIdToken().catch(() => {})
     } else if (localStorage.getItem(USER_KEY)) {
         _sessionExpired()
     }
@@ -80,6 +93,7 @@ function _friendlyAuthError(err) {
 
 function _storeUser(user) {
     const info = { user_id: user.uid, email: user.email }
+    contentCache.setUser(user.uid)
     localStorage.setItem(USER_KEY, JSON.stringify(info))
     return info
 }
@@ -110,7 +124,6 @@ export const auth = {
     },
 
     async loginWithGoogle() {
-        const { signInWithGoogle } = await import('./firebase.js')
         const user = await signInWithGoogle()
         return _storeUser(user)
     },
@@ -118,49 +131,7 @@ export const auth = {
     async logout() {
         try { await signOut(fbAuth) } catch { /* no-op */ }
         localStorage.removeItem(USER_KEY)
-    },
-}
-
-// ── Thoughts API ──────────────────────────────────────────────
-
-const THOUGHTS = 'thoughts'
-
-function _thoughtFromDoc(snap) {
-    const data = snap.data() || {}
-    return {
-        id: snap.id,
-        text: data.text || '',
-        created_at: data.created_at?.toDate?.().toISOString() ?? null,
-        user_id: data.user_id || '',
-    }
-}
-
-export const thoughtsAPI = {
-    async list() {
-        const user = await _requireUser()
-        const snap = await getDocs(query(
-            collection(db, THOUGHTS),
-            where('user_id', '==', user.uid),
-            orderBy('created_at', 'desc'),
-        ))
-        const thoughts = snap.docs.map(_thoughtFromDoc)
-        return { thoughts, count: thoughts.length }
-    },
-
-    async create(text) {
-        const user = await _requireUser()
-        const docRef = await addDoc(collection(db, THOUGHTS), {
-            text: text.trim(),
-            user_id: user.uid,
-            created_at: serverTimestamp(),
-        })
-        return _thoughtFromDoc(await getDoc(docRef))
-    },
-
-    async delete(thoughtId) {
-        await _requireUser()
-        await deleteDoc(doc(db, THOUGHTS, thoughtId))  // rules enforce ownership
-        return null
+        contentCache.clear().catch(() => {})
     },
 }
 
@@ -187,51 +158,186 @@ function _withTimeout(promise, ms, message = 'Request timed out') {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
 }
 
+// Unlike Promise.race(), this actually cancels the network request when its
+// deadline passes. That matters for note reads: Firebase Storage's SDK retries
+// downloads internally, so racing getBytes() against a timer left the original
+// requests alive. Six background prefetches could then keep retrying after the
+// UI had reported a timeout and crowd out the note the user explicitly opened.
+async function _fetchWithTimeout(url, options, ms, message) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), ms)
+    try {
+        return await fetch(url, { ...options, signal: controller.signal })
+    } catch (err) {
+        if (err && err.name === 'AbortError') {
+            const timeout = new Error(message)
+            timeout.code = 'app/timeout'
+            throw timeout
+        }
+        throw err
+    } finally {
+        clearTimeout(timer)
+    }
+}
+
+function _storageObjectUrl(user, path) {
+    const bucket = storage.app.options.storageBucket
+    const objectName = `${user.uid}/${path}`
+    return `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(bucket)}` +
+        `/o/${encodeURIComponent(objectName)}?alt=media`
+}
+
+async function _readViaRest(user, path, forceRefresh = false) {
+    const token = await _withTimeout(
+        user.getIdToken(forceRefresh),
+        10000,
+        'Timed out refreshing your session',
+    )
+    const res = await _fetchWithTimeout(
+        _storageObjectUrl(user, path),
+        { headers: { Authorization: `Firebase ${token}` }, cache: 'no-store' },
+        15000,
+        `Timed out reading ${path}`,
+    )
+
+    // A stale token can survive in a long-running/backgrounded mobile tab.
+    // Force one refresh, then surface a real auth failure if it still fails.
+    if (res.status === 401 && !forceRefresh) return _readViaRest(user, path, true)
+    if (res.status === 404) return { content: '', missing: true }
+    if (!res.ok) {
+        const err = new Error(`Could not read ${path} (${res.status})`)
+        err.status = res.status
+        throw err
+    }
+    return { content: await res.text(), missing: false }
+}
+
+// ── Listing the vault ─────────────────────────────────────────
+// The SDK's listAll() walks one HTTP request per folder (it always passes
+// delimiter='/') and then getMetadata() is another request per file — roughly
+// 70 round-trips for this vault, all before a fresh browser can paint anything.
+//
+// The same REST endpoint with no delimiter returns the entire subtree flat in
+// one response, so the whole vault arrives in a single request. Note the
+// response carries only {name, bucket} per item — no size or mtime — so
+// timestamps are backfilled later, off the critical path, by _backfillTimes().
+// If the endpoint ever stops listing recursively we fall back to the SDK walk.
+let _restListBroken = false
+
+async function _listViaRest(user) {
+    const token = await user.getIdToken()
+    const bucket = storage.app.options.storageBucket
+    const endpoint = `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(bucket)}/o`
+    const prefix = `${user.uid}/`
+    const files = []
+    let pageToken = null
+    let pages = 0
+
+    do {
+        let url = `${endpoint}?prefix=${encodeURIComponent(prefix)}&maxResults=1000`
+        if (pageToken) url += `&pageToken=${encodeURIComponent(pageToken)}`
+
+        const res = await _withTimeout(
+            fetch(url, { headers: { Authorization: `Firebase ${token}` } }),
+            20000,
+            'Timed out listing your vault',
+        )
+        if (!res.ok) {
+            const err = new Error(`Vault list failed (${res.status})`)
+            err.status = res.status
+            throw err
+        }
+        const data = await res.json()
+
+        // A non-empty `prefixes` means the backend collapsed subfolders, i.e. it
+        // applied a delimiter we didn't ask for — the listing would be missing
+        // every nested note. Bail out to the SDK walk rather than show an empty
+        // vault.
+        if (Array.isArray(data.prefixes) && data.prefixes.length) {
+            const err = new Error('Recursive listing not supported')
+            err.code = 'app/list-delimited'
+            throw err
+        }
+
+        for (const item of data.items || []) {
+            const name = item && item.name
+            if (typeof name !== 'string' || !name.startsWith(prefix)) continue
+            files.push({
+                path: name.slice(prefix.length),
+                // Read defensively: these keys aren't on the wire today, but
+                // costing nothing means we pick them up free if that changes.
+                updated_at: item.updated || item.timeCreated || null,
+                size: item.size != null ? Number(item.size) : null,
+            })
+        }
+        pageToken = data.nextPageToken || null
+    } while (pageToken && ++pages < 50)
+
+    return files
+}
+
+// Fallback: the SDK's folder-by-folder walk. Still skips the per-file
+// getMetadata() the old code did — that was one request per note for a
+// timestamp label. _backfillTimes fetches those later, off the critical path.
+async function _listViaSdk(user) {
+    const prefixLen = user.uid.length + 1
+    const files = []
+    const walk = async (dirRef) => {
+        const page = await listAll(dirRef)
+        for (const item of page.items) {
+            files.push({ path: item.fullPath.slice(prefixLen), updated_at: null, size: null })
+        }
+        await Promise.all(page.prefixes.map(walk))
+    }
+    await walk(ref(storage, user.uid))
+    return files
+}
+
 export const vaultAPI = {
     // Returns raw flat list: [{ path, updated_at, size }, ...]
     async listFiles() {
         const user = await _requireUser()
-        const prefixLen = user.uid.length + 1
-        const files = []
-        const walk = async (dirRef) => {
-            const page = await listAll(dirRef)
-            const metas = await Promise.all(page.items.map(item => getMetadata(item).catch(() => null)))
-            page.items.forEach((item, i) => {
-                files.push({
-                    path: item.fullPath.slice(prefixLen),
-                    updated_at: metas[i] ? metas[i].updated : null,
-                    size: metas[i] ? Number(metas[i].size) : null,
-                })
-            })
-            await Promise.all(page.prefixes.map(walk))
+        if (!_restListBroken) {
+            try {
+                return await _listViaRest(user)
+            } catch (err) {
+                // A 401/403 is a real auth problem, not a reason to retry the
+                // slow path — surface it.
+                if (err && (err.status === 401 || err.status === 403)) throw err
+                // Only latch on evidence that the endpoint itself won't do what
+                // we need. A timeout, a dropped connection, a 429 or a 5xx means
+                // "try again", not "this API is unsupported" — latching on those
+                // would strand the whole session on the ~70-request SDK walk.
+                if (err && (err.code === 'app/list-delimited' || err.status === 400)) {
+                    _restListBroken = true
+                }
+            }
         }
-        await walk(ref(storage, user.uid))
-        return files
+        return _withTimeout(_listViaSdk(user), 30000, 'Timed out listing your vault')
     },
 
-    // Returns file content as text.
-    // A missing object resolves to '' (a freshly-created file whose upload
-    // hasn't propagated yet is not an error — it's just empty). The read is
-    // also bounded by a timeout so a stalled request can't hang the UI forever.
-    async readFile(path) {
+    // Reads a file, reporting whether the object was actually there.
+    // A missing object resolves to { content: '', missing: true } rather than
+    // erroring — a freshly-created file whose upload hasn't propagated yet is
+    // not a failure. Callers must not cache a `missing` result: treating "not
+    // found" as "empty" is how a transient 404 blanks a real note. The read is
+    // bounded by a timeout so a stalled request can't hang the UI forever.
+    async readFileResult(path) {
         const user = await _requireUser()
-        try {
-            const bytes = await _withTimeout(
-                getBytes(_fileRef(user, path)),
-                15000,
-                `Timed out reading ${path}`,
-            )
-            return new TextDecoder().decode(bytes)
-        } catch (err) {
-            if (err && err.code === 'storage/object-not-found') return ''
-            throw err
-        }
+        return _readViaRest(user, path)
+    },
+
+    // Returns file content as text (missing → ''), for callers that don't care
+    // about the distinction.
+    async readFile(path) {
+        return (await vaultAPI.readFileResult(path)).content
     },
 
     async writeFile(path, content) {
         const user = await _requireUser()
+        const bytes = assertNoteSize(content)
         await uploadString(_fileRef(user, path), content, 'raw', { contentType: 'text/markdown' })
-        return { path, bytes: content.length }
+        return { path, bytes }
     },
 
     async deleteFile(path) {
@@ -258,35 +364,28 @@ export const vaultAPI = {
 let _metaCache = null
 let _metaCacheKey = null
 
-// ── Content cache (sessionStorage for recently opened files) ──
-const CONTENT_CACHE_PREFIX = 'nc_fcache_'
-const CONTENT_CACHE_MAX = 50
+// localStorage.setItem is synchronous and re-serialises the whole vault, so a
+// burst of mutations (an import, a bulk delete) used to block the main thread
+// once per file. Coalesce writes into the next frame instead; a pagehide flush
+// keeps the last one from being lost.
+let _metaWritePending = false
+let _metaWriteScheduled = false
 
-function _cacheContent(filePath, content) {
-    try {
-        sessionStorage.setItem(CONTENT_CACHE_PREFIX + filePath, content)
-        // Evict oldest entries if too many
-        const keys = []
-        for (let i = 0; i < sessionStorage.length; i++) {
-            const k = sessionStorage.key(i)
-            if (k.startsWith(CONTENT_CACHE_PREFIX)) keys.push(k)
-        }
-        if (keys.length > CONTENT_CACHE_MAX) {
-            // Remove first (oldest) entries
-            keys.slice(0, keys.length - CONTENT_CACHE_MAX).forEach(k => sessionStorage.removeItem(k))
-        }
-    } catch { /* quota exceeded — ignore */ }
+function _flushMeta() {
+    if (!_metaWritePending) return
+    _metaWritePending = false
+    try { localStorage.setItem(_metaCacheKey, JSON.stringify(_metaCache)) }
+    catch { /* quota — the in-memory copy is still authoritative this session */ }
 }
 
-function _getCachedContent(filePath) {
-    try { return sessionStorage.getItem(CONTENT_CACHE_PREFIX + filePath) }
-    catch { return null }
-}
+window.addEventListener('pagehide', _flushMeta)
+document.addEventListener('visibilitychange', () => { if (document.hidden) _flushMeta() })
 
-// ── Cloud sync dedup — only one sync in-flight at a time ──
+// ── Cloud sync dedup — only one sync in-flight, and not more than one per
+// SYNC_TTL, so navigating around the app doesn't re-list the vault repeatedly.
 let _syncPromise = null
-let _lastSyncTime = 0
-const SYNC_MIN_INTERVAL = 5000  // minimum 5s between syncs
+let _lastSyncAt = 0
+const SYNC_TTL = 15_000
 
 function metaKey() {
     const user = auth.getUser()
@@ -297,6 +396,7 @@ function loadMeta() {
     const key = metaKey()
     // Return in-memory cache if available and same user
     if (_metaCache && _metaCacheKey === key) return _metaCache
+    _flushMeta()
     try {
         _metaCache = JSON.parse(localStorage.getItem(key)) || { folders: [] }
     } catch {
@@ -309,7 +409,13 @@ function loadMeta() {
 function saveMeta(meta) {
     _metaCache = meta
     _metaCacheKey = metaKey()
-    localStorage.setItem(_metaCacheKey, JSON.stringify(meta))
+    _metaWritePending = true
+    // Once the tab is hidden there may be no next frame — a save racing a tab
+    // close has to land now, not on a callback that never fires.
+    if (document.visibilityState === 'hidden') { _flushMeta(); return }
+    if (_metaWriteScheduled) return
+    _metaWriteScheduled = true
+    requestAnimationFrame(() => { _metaWriteScheduled = false; _flushMeta() })
 }
 
 function uid() { return crypto.randomUUID() }
@@ -318,9 +424,26 @@ function slug(name) {
     return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || uid()
 }
 
+function cleanLabel(value, kind, maxLength = 200) {
+    const label = String(value ?? '').trim()
+    if (!label) throw new Error(`${kind} cannot be empty`)
+    if (label.length > maxLength) throw new Error(`${kind} must be ${maxLength} characters or fewer`)
+    return label
+}
+
+function assertNoteSize(content) {
+    const bytes = new TextEncoder().encode(String(content ?? '')).byteLength
+    if (bytes > MAX_NOTE_BYTES) {
+        const err = new Error('Note is too large to sync (5 MB maximum)')
+        err.code = 'app/file-too-large'
+        throw err
+    }
+    return bytes
+}
+
 // Ensure a folder exists for each segment of a path, returning the leaf folder.
 // e.g. "notes/archive/2024" creates/finds folders for notes, notes/archive, notes/archive/2024
-function ensureFolderPath(folderPath, meta) {
+function ensureFolderPath(folderPath, meta, index) {
     const segments = folderPath.split('/')
     let parentId = null
     let currentPath = ''
@@ -328,7 +451,7 @@ function ensureFolderPath(folderPath, meta) {
 
     for (const seg of segments) {
         currentPath = currentPath ? `${currentPath}/${seg}` : seg
-        folder = meta.folders.find(f => f.path === currentPath)
+        folder = index ? index.get(currentPath) : meta.folders.find(f => f.path === currentPath)
         if (!folder) {
             folder = {
                 id: uid(),
@@ -339,20 +462,17 @@ function ensureFolderPath(folderPath, meta) {
                 files: [],
             }
             meta.folders.push(folder)
+            if (index) index.set(currentPath, folder)
         }
         parentId = folder.id
     }
     return folder
 }
 
-// Merge a raw vault file list into the local folder/file meta cache
+// Merge a raw vault file list into the local folder/file meta cache.
+// Indexed by path so a 70-object vault costs one pass, not one linear scan of
+// every folder per file.
 function syncMetaFromCloud(rawFiles, meta) {
-    // Build a set of all known file paths
-    const knownPaths = new Set()
-    for (const folder of meta.folders) {
-        for (const file of folder.files) knownPaths.add(file.path)
-    }
-
     // Migrate old-style folders (no .path field) to new style
     for (const folder of meta.folders) {
         if (!folder.path) {
@@ -361,61 +481,173 @@ function syncMetaFromCloud(rawFiles, meta) {
         }
     }
 
+    // A successful cloud listing is authoritative. Remove stale local file
+    // records (including deletions made on another device), but preserve any
+    // optimistic writes that are still queued locally and therefore may not be
+    // visible in Storage yet.
+    const cloudPaths = new Set(rawFiles.map(item => item.path).filter(Boolean))
+    const pendingPaths = new Set(offlineQueue.getPending())
+    for (const folder of meta.folders) {
+        folder.files = folder.files.filter(file => {
+            const keep = cloudPaths.has(file.path) || pendingPaths.has(file.path)
+            if (!keep) contentCache.delete(file.path)
+            return keep
+        })
+    }
+
+    const byFolderPath = new Map(meta.folders.map(f => [f.path, f]))
+    const byFilePath = new Map()
+    for (const folder of meta.folders) {
+        for (const file of folder.files) byFilePath.set(file.path, file)
+    }
+
     for (const item of rawFiles) {
         const path = item.path
         if (!path || !path.includes('/')) continue   // skip root-level files
         if (path.endsWith('/.keep')) {
             // Ensure the folder exists in meta even if it has no files yet
-            const folderPath = path.replace(/\/\.keep$/, '')
-            ensureFolderPath(folderPath, meta)
+            ensureFolderPath(path.replace(/\/\.keep$/, ''), meta, byFolderPath)
             continue
         }
         // Only process .md files
         if (!path.endsWith('.md')) continue
 
-        if (knownPaths.has(path)) {
-            // Update timestamps from cloud
-            for (const folder of meta.folders) {
-                const file = folder.files.find(f => f.path === path)
-                if (file) { file.updated_at = item.updated_at || file.updated_at; break }
-            }
+        const known = byFilePath.get(path)
+        if (known) {
+            if (item.updated_at) known.updated_at = item.updated_at
             continue
         }
 
         // New file from cloud — determine its folder (all segments except last)
         const parts = path.split('/')
         const fileName = parts[parts.length - 1]
-        const folderPath = parts.slice(0, -1).join('/')
+        const folder = ensureFolderPath(parts.slice(0, -1).join('/'), meta, byFolderPath)
 
-        const folder = ensureFolderPath(folderPath, meta)
-        folder.files.unshift({
+        const file = {
             id: uid(),
             title: fileName.replace(/\.md$/, '').replace(/-/g, ' '),
             path,
             content: '',
             contentLoaded: false,
             created_at: item.updated_at || new Date().toISOString(),
-            updated_at: item.updated_at || new Date().toISOString(),
-        })
+            // Left null when the listing didn't carry a time — the files view
+            // renders that as "—" rather than lying with "just now", and
+            // _backfillTimes fills it in from the background pass.
+            updated_at: item.updated_at || null,
+        }
+        folder.files.unshift(file)
+        byFilePath.set(path, file)
     }
 
     return meta
 }
 
+// ── Background content prefetch ───────────────────────────────
+// Once we know what's in the vault, quietly pull every note into the persistent
+// cache. Notes are small (this vault is ~300KB in total), the requests are
+// idle-scheduled so they don't compete with the first paint, and afterwards
+// opening any note is a synchronous cache hit instead of a round-trip.
+const PREFETCH_MAX_FILES = 400
+const PREFETCH_CONCURRENCY = 6
+let _prefetchBusy = false
+
+function _onIdle(fn, timeout = 2000) {
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(fn, { timeout })
+    else setTimeout(fn, 250)
+}
+
+// Reads currently in flight, keyed by path, so the foreground folder prefetch
+// and the background sweep never fetch the same note twice.
+const _inFlightReads = new Map()
+
+// Bumped whenever this browser writes a note. A prefetch response that comes
+// back after a save has stale content, and caching it would silently roll the
+// save back in memory and in IndexedDB — so compare the counter across the
+// request and drop the response if it moved.
+const _writeSeq = new Map()
+
+function _noteLocalWrite(path) {
+    _writeSeq.set(path, (_writeSeq.get(path) || 0) + 1)
+}
+
+function _prefetchOne(path, skip) {
+    if (contentCache.getSync(path)) return Promise.resolve(false)
+    if (skip && skip.has(path)) return Promise.resolve(false)
+    const existing = _inFlightReads.get(path)
+    if (existing) return existing
+
+    const seqBefore = _writeSeq.get(path) || 0
+    const p = (async () => {
+        try {
+            const { content, missing } = await vaultAPI.readFileResult(path)
+            if (missing) return false                       // never cache a 404 as an empty note
+            if ((_writeSeq.get(path) || 0) !== seqBefore) return false   // a save won the race
+            contentCache.set(path, content)
+            return true
+        } catch {
+            return false                                    // it'll just load on demand
+        } finally {
+            _inFlightReads.delete(path)
+        }
+    })()
+    _inFlightReads.set(path, p)
+    return p
+}
+
+async function _prefetchContents(paths, concurrency = PREFETCH_CONCURRENCY) {
+    // Never race a write we already know about: anything queued for upload has
+    // local content that is newer than whatever the cloud would hand back.
+    const skip = new Set(offlineQueue.getPending())
+    const todo = paths.filter(p => !contentCache.getSync(p) && !skip.has(p))
+    if (!todo.length) return 0
+    let i = 0
+    let done = 0
+    const worker = async () => {
+        while (i < todo.length) {
+            if (await _prefetchOne(todo[i++], skip)) done++
+        }
+    }
+    await Promise.all(
+        Array.from({ length: Math.min(concurrency, todo.length) }, worker),
+    )
+    return done
+}
+
+function _schedulePrefetch(folders) {
+    if (_prefetchBusy) return
+    const files = folders.flatMap(f => f.files).filter(f => f.path)
+    if (!files.length || files.length > PREFETCH_MAX_FILES) return
+    _prefetchBusy = true
+    // Wait for the IndexedDB warm-up before deciding what's missing — otherwise
+    // a browser that already has the whole vault cached re-downloads all of it
+    // because getSync hasn't been populated yet.
+    cacheReady
+        .then(() => new Promise(resolve => _onIdle(resolve)))
+        .then(() => {
+            const paths = files.map(f => f.path)
+            if (!paths.some(p => !contentCache.getSync(p))) return 0
+            return _prefetchContents(paths)
+        })
+        .catch(() => {})
+        .finally(() => { _prefetchBusy = false })
+}
+
 export const foldersAPI = {
     async listFromCloud() {
-        // Dedup: reuse in-flight sync if called multiple times quickly
-        const now = Date.now()
-        if (_syncPromise && (now - _lastSyncTime) < SYNC_MIN_INTERVAL) {
-            return _syncPromise
-        }
-        _lastSyncTime = now
+        // Reuse an in-flight sync rather than firing a second identical listing.
+        if (_syncPromise) return _syncPromise
+        // Every visit to the folders view calls this. Bouncing between views
+        // shouldn't re-list the vault each time — the 60s poll and the
+        // foreground/online handlers cover genuine freshness.
+        if (Date.now() - _lastSyncAt < SYNC_TTL) return loadMeta().folders
         _syncPromise = (async () => {
             try {
                 const rawFiles = await vaultAPI.listFiles()
                 let meta = loadMeta()
                 meta = syncMetaFromCloud(rawFiles, meta)
                 saveMeta(meta)
+                _lastSyncAt = Date.now()
+                _schedulePrefetch(meta.folders)
                 return meta.folders
             } finally {
                 _syncPromise = null
@@ -423,6 +655,7 @@ export const foldersAPI = {
         })()
         return _syncPromise
     },
+
 
     list() {
         return loadMeta().folders
@@ -438,15 +671,71 @@ export const foldersAPI = {
         return loadMeta().folders.filter(f => f.parentId === parentId)
     },
 
+    // Pull one folder's notes into the cache right now, ahead of the idle sweep.
+    // The user's path is grid → folder → note, so by the time they've read the
+    // filenames the note they click is already local — a same-frame open instead
+    // of a spinner and a round-trip. Deliberately narrow and low-concurrency:
+    // these share one HTTP/2 connection with whatever the user opens next.
+    prefetchFolder(folderId) {
+        const folder = loadMeta().folders.find(f => f.id === folderId)
+        if (!folder) return Promise.resolve(0)
+        const paths = folder.files.map(f => f.path).filter(Boolean)
+        if (!paths.length) return Promise.resolve(0)
+        return cacheReady
+            .then(() => _prefetchContents(paths, 3))
+            .catch(() => 0)
+    },
+
+    // Fill in modification times for one folder's notes. The flat listing
+    // carries no timestamps, and fetching them for the whole vault cost one
+    // request per note (plus a CORS preflight each) — about half of all
+    // cold-load traffic, for a "3 days ago" label. Now only the folder actually
+    // on screen pays, and only once.
+    async backfillTimes(folderId, onDone) {
+        const meta = loadMeta()
+        const folder = meta.folders.find(f => f.id === folderId)
+        if (!folder) return
+        const unknown = folder.files.filter(f => f.path && !f.updated_at)
+        if (!unknown.length) return
+        let user
+        try { user = await _requireUser() } catch { return }
+
+        let i = 0
+        let filled = 0
+        const worker = async () => {
+            while (i < unknown.length) {
+                const file = unknown[i++]
+                try {
+                    const stat = await getMetadata(_fileRef(user, file.path))
+                    if (stat && stat.updated) { file.updated_at = stat.updated; filled++ }
+                } catch { /* a note we can't stat just shows no timestamp */ }
+            }
+        }
+        await Promise.all(
+            Array.from({ length: Math.min(PREFETCH_CONCURRENCY, unknown.length) }, worker),
+        )
+        if (!filled) return
+        saveMeta(meta)
+        // Without this the labels stay "—" until something else happens to
+        // repaint the view.
+        if (onDone) onDone(folder)
+    },
+
+    // Optimistic: the folder shows up immediately and its cloud marker is
+    // written in the background, so "New folder" doesn't wait on an upload.
     async create(name, parentId = null) {
         const meta = loadMeta()
         const parent = parentId ? meta.folders.find(f => f.id === parentId) : null
-        const folderSlug = slug(name)
-        const folderPath = parent ? `${parent.path}/${folderSlug}` : folderSlug
+        const cleanName = cleanLabel(name, 'Folder name', 100)
+        const base = slug(cleanName)
+        const taken = new Set(meta.folders.map(f => f.path))
+        const prefix = parent ? `${parent.path}/` : ''
+        let folderPath = `${prefix}${base}`
+        for (let n = 2; taken.has(folderPath); n++) folderPath = `${prefix}${base}-${n}`
 
         const folder = {
             id: uid(),
-            name: name.trim(),
+            name: cleanName,
             path: folderPath,
             parentId: parentId || null,
             created_at: new Date().toISOString(),
@@ -454,8 +743,7 @@ export const foldersAPI = {
         }
         meta.folders.push(folder)
         saveMeta(meta)
-        // Persist folder marker to cloud
-        await vaultAPI.writeFile(folderPath + '/.keep', '')
+        backgroundWrite(folderPath + '/.keep', '')
         return folder
     },
 
@@ -463,7 +751,7 @@ export const foldersAPI = {
         const meta = loadMeta()
         const folder = meta.folders.find(f => f.id === folderId)
         if (!folder) throw new Error('Folder not found')
-        folder.name = newName.trim()
+        folder.name = cleanLabel(newName, 'Folder name', 100)
         // Note: renaming path would require moving all cloud files — keep path stable
         saveMeta(meta)
         return folder
@@ -510,6 +798,7 @@ export const foldersAPI = {
 
         const allFiles = toDelete.flatMap(f => f.files)
         const keepMarkers = toDelete.map(f => f.path + '/.keep')
+        allFiles.forEach(f => contentCache.delete(f.path))
         await Promise.all([
             ...allFiles.map(f => vaultAPI.deleteFile(f.path).catch(() => {})),
             ...keepMarkers.map(p => vaultAPI.deleteFile(p).catch(() => {})),
@@ -537,10 +826,18 @@ export const foldersAPI = {
         const total = allPaths.length || 1
         let done = 0
 
-        for (const path of allPaths) {
-            await vaultAPI.deleteFile(path).catch(() => {})
-            done++
-            if (onProgress) onProgress(done, total)
+        // Delete in parallel batches instead of strictly one at a time — the
+        // progress bar still ticks, but a 60-file folder no longer takes 60
+        // sequential round-trips.
+        const BATCH = 8
+        for (let i = 0; i < allPaths.length; i += BATCH) {
+            const batch = allPaths.slice(i, i + BATCH)
+            await Promise.all(batch.map(async path => {
+                await vaultAPI.deleteFile(path).catch(() => {})
+                contentCache.delete(path)
+                done++
+                if (onProgress) onProgress(done, total)
+            }))
         }
 
         const deleteIds = new Set(toDelete.map(f => f.id))
@@ -556,49 +853,88 @@ export const filesAPI = {
         return folder ? folder.files : []
     },
 
+    // Synchronous cache peek. Fills in `file.content` from the persistent cache
+    // if we already have the note, so the editor can render on the same frame
+    // as the click instead of showing "Loading file...". Returns true on a hit.
+    peekCached(folderId, fileId) {
+        const meta = loadMeta()
+        const folder = meta.folders.find(f => f.id === folderId)
+        if (!folder) return false
+        const file = folder.files.find(f => f.id === fileId)
+        if (!file || file.contentLoaded) return !!file?.contentLoaded
+        const hit = contentCache.getSync(file.path)
+        if (!hit) return false
+        file.content = hit.content
+        file.contentLoaded = true
+        return true
+    },
+
+    // Optimistic: the note exists locally (and in the content cache) the moment
+    // this returns, so the editor opens instantly. The upload happens in the
+    // background and is queued for retry if it fails.
     async create(folderId, title, content = '') {
         const meta = loadMeta()
         const folder = meta.folders.find(f => f.id === folderId)
         if (!folder) throw new Error('Folder not found')
 
-        const fileSlug = slug(title) + '.md'
-        const path = `${folder.path}/${fileSlug}`
+        // Two notes titled the same slug to the same object. Before, the second
+        // upload silently overwrote the first; now that the write happens in the
+        // background there'd be no error at all to notice. Pick a free name.
+        const cleanTitle = cleanLabel(title, 'File title')
+        assertNoteSize(content)
+        const base = slug(cleanTitle)
+        const taken = new Set(folder.files.map(f => f.path))
+        let path = `${folder.path}/${base}.md`
+        for (let n = 2; taken.has(path); n++) path = `${folder.path}/${base}-${n}.md`
 
-        await vaultAPI.writeFile(path, content)
-
+        const now = new Date().toISOString()
         const file = {
             id: uid(),
-            title: title.trim(),
+            title: cleanTitle,
             path,
             content,
             contentLoaded: true,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
+            created_at: now,
+            updated_at: now,
         }
         folder.files.unshift(file)
         saveMeta(meta)
+        _noteLocalWrite(path)
+        contentCache.set(path, content)
+        backgroundWrite(path, content)
         return file
     },
 
-    async loadContent(folderId, fileId) {
+    // Stale-while-revalidate: a cached note resolves on the next microtask and
+    // the cloud copy is checked in the background, calling `onFresh` only if it
+    // actually differs. Only a genuine cache miss waits on the network.
+    async loadContent(folderId, fileId, onFresh) {
         const meta = loadMeta()
         const folder = meta.folders.find(f => f.id === folderId)
         if (!folder) throw new Error('Folder not found')
         const file = folder.files.find(f => f.id === fileId)
         if (!file) throw new Error('File not found')
 
-        // Show cached content instantly if available, then refresh from cloud
-        const cached = _getCachedContent(file.path)
-        if (cached !== null && !file.contentLoaded) {
-            file.content = cached
+        const cached = contentCache.getSync(file.path)
+        if (cached) {
+            file.content = cached.content
             file.contentLoaded = true
+            saveMeta(meta)
+            _revalidate(file, meta, onFresh)
+            return file
         }
 
-        // Always fetch fresh content from cloud so edits on other devices are visible
-        const freshContent = await vaultAPI.readFile(file.path)
-        file.content = freshContent
+        const { content: fresh, missing } = await vaultAPI.readFileResult(file.path)
+        if (missing) {
+            const err = new Error('This note no longer exists in the cloud')
+            err.code = 'app/file-missing'
+            throw err
+        }
+        file.content = fresh
         file.contentLoaded = true
-        _cacheContent(file.path, freshContent)
+        // Don't cache a 404 as an empty note — the object may simply not have
+        // propagated yet, and a cached '' would then be served forever.
+        if (!missing) contentCache.set(file.path, fresh)
         saveMeta(meta)
         return file
     },
@@ -610,11 +946,28 @@ export const filesAPI = {
         const file = folder.files.find(f => f.id === fileId)
         if (!file) throw new Error('File not found')
 
-        if (title !== undefined) file.title = title.trim()
+        if (title !== undefined) file.title = cleanLabel(title, 'File title')
         if (content !== undefined) {
+            assertNoteSize(content)
             file.content = content
-            _cacheContent(file.path, content)
-            await vaultAPI.writeFile(file.path, content)
+            _noteLocalWrite(file.path)      // invalidate any prefetch in flight
+            contentCache.set(file.path, content)
+            try {
+                await vaultAPI.writeFile(file.path, content)
+            } catch (err) {
+                // The IndexedDB cache already holds this edit; queue it now as
+                // well so a tab close immediately after an offline save cannot
+                // strand the only durable copy on this device.
+                offlineQueue.enqueue(file.path, content)
+                file.updated_at = new Date().toISOString()
+                saveMeta(meta)
+                throw err
+            }
+            // This save supersedes anything still queued for the path — an
+            // optimistic create's queued body, or an earlier failed save.
+            // Leaving it queued would let a later flush overwrite what we just
+            // wrote with older content.
+            offlineQueue.dequeue(file.path)
         }
         file.updated_at = new Date().toISOString()
         saveMeta(meta)
@@ -626,7 +979,22 @@ export const filesAPI = {
         const folder = meta.folders.find(f => f.id === folderId)
         if (!folder) throw new Error('Folder not found')
         const file = folder.files.find(f => f.id === fileId)
-        if (file) await vaultAPI.deleteFile(file.path).catch(() => {})
+        if (file) {
+            await vaultAPI.deleteFile(file.path)
+            contentCache.delete(file.path)
+        }
+        folder.files = folder.files.filter(f => f.id !== fileId)
+        saveMeta(meta)
+    },
+
+    // Drop a stale local record after an authoritative 404 without issuing a
+    // second cloud delete. Used by the editor recovery path.
+    forgetLocal(folderId, fileId) {
+        const meta = loadMeta()
+        const folder = meta.folders.find(f => f.id === folderId)
+        if (!folder) return
+        const file = folder.files.find(f => f.id === fileId)
+        if (file) contentCache.delete(file.path)
         folder.files = folder.files.filter(f => f.id !== fileId)
         saveMeta(meta)
     },
@@ -642,15 +1010,34 @@ export const filesAPI = {
 
         const file = sourceFolder.files[fileIdx]
         const fileName = file.path.split('/').pop()
-        const newPath = `${targetFolder.path}/${fileName}`
+        const oldPath = file.path
+        const taken = new Set(targetFolder.files.map(f => f.path))
+        const stem = fileName.replace(/\.md$/, '')
+        let newPath = `${targetFolder.path}/${fileName}`
+        for (let n = 2; taken.has(newPath); n++) newPath = `${targetFolder.path}/${stem}-${n}.md`
 
         // Read content, write to new path, delete old
         let content = file.content || ''
         if (!file.contentLoaded) {
-            try { content = await vaultAPI.readFile(file.path) } catch { /* use empty */ }
+            const cached = contentCache.getSync(oldPath)
+            if (cached) content = cached.content
+            else {
+                const result = await vaultAPI.readFileResult(oldPath)
+                if (result.missing) throw new Error('Cannot move a note that no longer exists in the cloud')
+                content = result.content
+            }
         }
         await vaultAPI.writeFile(newPath, content)
-        await vaultAPI.deleteFile(file.path).catch(() => {})
+        try {
+            await vaultAPI.deleteFile(oldPath)
+        } catch (err) {
+            // Keep a failed move atomic from the user's point of view. If the
+            // old object could not be removed, roll back the newly-written copy
+            // instead of creating a duplicate on the next cloud sync.
+            await vaultAPI.deleteFile(newPath).catch(() => {})
+            throw err
+        }
+        contentCache.rename(oldPath, newPath)
 
         file.path = newPath
         sourceFolder.files.splice(fileIdx, 1)
@@ -660,6 +1047,38 @@ export const filesAPI = {
     },
 }
 
+// The body of a note, wherever it currently lives. The background prefetch
+// fills the content cache without touching the meta records, so anything that
+// reads `file.content` straight off a meta record (backlinks, the graph, tag
+// search) would see '' for every note the user hasn't opened — even with the
+// whole vault cached locally. Read through here instead.
+export function contentFor(file) {
+    if (!file) return ''
+    if (file.content) return file.content
+    if (!file.path) return ''
+    const hit = contentCache.getSync(file.path)
+    return hit ? hit.content : ''
+}
+
+// Check the cloud copy of an already-cached note without making the caller wait.
+function _revalidate(file, meta, onFresh) {
+    vaultAPI.readFileResult(file.path)
+        .then(({ content: fresh, missing }) => {
+            // The object isn't there (yet). That is not evidence the note is
+            // empty — keep what we have rather than blanking it.
+            if (missing) return
+            if (fresh === file.content) return
+            // Likewise never let an empty read replace content we already hold.
+            if (fresh === '' && file.content) return
+            file.content = fresh
+            file.contentLoaded = true
+            contentCache.set(file.path, fresh)
+            saveMeta(meta)
+            if (onFresh) onFresh(file)
+        })
+        .catch(() => { /* offline — the cached copy stands */ })
+}
+
 // ── Sync status ──────────────────────────────────────────────
 // Tracks whether the app can reach the backend and the session is valid.
 // States: 'synced' | 'checking' | 'offline' | 'expired'
@@ -667,6 +1086,7 @@ export const filesAPI = {
 let _syncStatus = 'checking'
 let _syncListeners = []
 let _syncCheckTimer = null
+let _syncInitialTimer = null
 
 export const syncStatus = {
     get() { return _syncStatus },
@@ -712,13 +1132,23 @@ export const syncStatus = {
     },
 
     startPolling() {
-        syncStatus.check()
+        // Don't probe on the same tick as boot: the first vault listing is the
+        // request that matters and it reports the same information. Hold the
+        // probe until the critical path is clear.
         if (_syncCheckTimer) clearInterval(_syncCheckTimer)
+        if (_syncInitialTimer) clearTimeout(_syncInitialTimer)
+        _syncInitialTimer = setTimeout(() => {
+            _syncInitialTimer = null
+            if (_syncStatus === 'checking') syncStatus.check()
+            // Replay anything stranded by a previous session.
+            if (offlineQueue.getPending().length) offlineQueue.flush().catch(() => {})
+        }, 3000)
         _syncCheckTimer = setInterval(() => syncStatus.check(), 60_000)
     },
 
     stopPolling() {
         if (_syncCheckTimer) { clearInterval(_syncCheckTimer); _syncCheckTimer = null }
+        if (_syncInitialTimer) { clearTimeout(_syncInitialTimer); _syncInitialTimer = null }
     },
 }
 
@@ -740,16 +1170,37 @@ foldersAPI.listFromCloud = async function () {
 // ── Offline save queue ────────────────────────────────────────
 // When a save fails while offline, stash {path, content} locally
 // (last-write-wins per path) and replay it when the network returns.
-const PENDING_SAVES_KEY = 'nc_pending_saves'
+const LEGACY_PENDING_SAVES_KEY = 'nc_pending_saves'
+
+function pendingSavesKey() {
+    const user = auth.getUser()
+    return user ? `nc_pending_saves_${user.user_id}` : 'nc_pending_saves_anon'
+}
 
 function _loadPending() {
-    try { return JSON.parse(localStorage.getItem(PENDING_SAVES_KEY)) || {} }
-    catch { return {} }
+    try {
+        const key = pendingSavesKey()
+        const scoped = localStorage.getItem(key)
+        if (scoped) return JSON.parse(scoped) || {}
+
+        // One-time migration from the original global queue. Attribute it only
+        // when a user is currently known; otherwise leave it untouched until
+        // authentication restoration completes.
+        const user = auth.getUser()
+        const legacy = user && localStorage.getItem(LEGACY_PENDING_SAVES_KEY)
+        if (!legacy) return {}
+        const parsed = JSON.parse(legacy) || {}
+        localStorage.setItem(key, JSON.stringify(parsed))
+        localStorage.removeItem(LEGACY_PENDING_SAVES_KEY)
+        return parsed
+    } catch { return {} }
 }
 
 function _savePending(map) {
-    try { localStorage.setItem(PENDING_SAVES_KEY, JSON.stringify(map)) } catch { /* quota */ }
+    try { localStorage.setItem(pendingSavesKey(), JSON.stringify(map)) } catch { /* quota */ }
 }
+
+let _flushPromise = null
 
 export const offlineQueue = {
     // Returns array of pending file paths
@@ -762,25 +1213,67 @@ export const offlineQueue = {
         _savePending(map)
     },
 
-    // Try to flush every queued write. Resolves to the number persisted.
-    async flush() {
+    dequeue(path) {
         const map = _loadPending()
-        const paths = Object.keys(map)
-        if (!paths.length) return 0
-        let done = 0
-        for (const path of paths) {
-            try {
-                await vaultAPI.writeFile(path, map[path].content)
-                delete map[path]
-                done++
-            } catch {
-                // Still failing — keep it queued and stop trying for now
-                break
-            }
-        }
+        if (!(path in map)) return
+        delete map[path]
         _savePending(map)
-        return done
     },
+
+    // Drop a queued write only if it is still the one we just persisted. A newer
+    // edit that landed in the queue meanwhile must survive, or replaying the
+    // queue would resurrect stale content over it.
+    dequeueIfUnchanged(path, content) {
+        const map = _loadPending()
+        const entry = map[path]
+        if (!entry || entry.content !== content) return
+        delete map[path]
+        _savePending(map)
+    },
+
+    // Try to flush every queued write. Resolves to the number persisted.
+    //
+    // Three separate triggers can call this (visibilitychange, online, and a
+    // successful reachability probe), so it has to be re-entrant-safe: two
+    // overlapping flushes each holding a snapshot of the queue would let the
+    // slower one write its stale snapshot back, resurrecting writes the other
+    // already drained and replaying them over newer content.
+    flush() {
+        if (_flushPromise) return _flushPromise
+        _flushPromise = (async () => {
+            let done = 0
+            try {
+                for (const path of Object.keys(_loadPending())) {
+                    // Re-read per iteration: an edit saved mid-flush may have
+                    // superseded or removed this entry.
+                    const entry = _loadPending()[path]
+                    if (!entry) continue
+                    try {
+                        await vaultAPI.writeFile(path, entry.content)
+                    } catch {
+                        // Still failing — keep it queued and stop trying for now
+                        break
+                    }
+                    offlineQueue.dequeueIfUnchanged(path, entry.content)
+                    done++
+                }
+            } finally {
+                _flushPromise = null
+            }
+            return done
+        })()
+        return _flushPromise
+    },
+}
+
+// Fire-and-forget upload used by the optimistic create paths. The write is
+// queued *before* it's attempted, so closing the tab mid-upload leaves it to be
+// replayed next session rather than losing it; a success dequeues it.
+function backgroundWrite(path, content) {
+    offlineQueue.enqueue(path, content)
+    vaultAPI.writeFile(path, content)
+        .then(() => offlineQueue.dequeueIfUnchanged(path, content))
+        .catch(() => { syncStatus._set('offline') })
 }
 
 // ── Mobile foreground / network refresh ───────────────────────
@@ -795,14 +1288,22 @@ export function enableMobileRefreshHandlers() {
 
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) return
+        _lastSyncAt = 0     // the vault may have moved on — re-list on the next view
         syncStatus.check()
         offlineQueue.flush().then(n => { if (n) syncStatus.check() }).catch(() => {})
     })
 
     window.addEventListener('online', async () => {
+        _lastSyncAt = 0
         await offlineQueue.flush().catch(() => 0)
         syncStatus.check()
     })
 
     window.addEventListener('offline', () => syncStatus._set('offline'))
 }
+
+// ── Boot: warm the note cache ─────────────────────────────────
+// One IndexedDB pass pulls this browser's cached notes into memory before the
+// user can click anything, so a returning visit opens notes with no network at
+// all. Exported so the app can await it when it needs to be sure.
+export const cacheReady = contentCache.warm().catch(() => 0)

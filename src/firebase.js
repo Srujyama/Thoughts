@@ -11,7 +11,6 @@ import {
     browserLocalPersistence,
     onAuthStateChanged,
 } from 'firebase/auth'
-import { getFirestore } from 'firebase/firestore'
 import { getStorage } from 'firebase/storage'
 
 // Public Firebase web config (safe to ship — these identify the project, they're
@@ -27,8 +26,11 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig)
 
 export const fbAuth = getAuth(app)
-export const db = getFirestore(app)
 export const storage = getStorage(app)
+// Firestore is deliberately not initialised: nothing in the app reads or writes
+// it, and importing it dragged 453KB minified (134KB gzipped) of dead SDK into
+// the entry chunk — 78% of the Firebase payload, downloaded before the first
+// vault request could even start.
 
 // Keep the Firebase session in localStorage so it survives reloads.
 setPersistence(fbAuth, browserLocalPersistence).catch(() => {})

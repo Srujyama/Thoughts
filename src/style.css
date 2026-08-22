@@ -801,10 +801,43 @@ body {
 @media (prefers-reduced-motion: reduce) {
     .scanlines { animation: none; opacity: calc(0.3 * var(--t-scanlines, 1)); }
     .noise-overlay { animation: none; opacity: 0; }
+    *, *::before, *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
 }
 @media (max-width: 600px) {
     .scanlines { animation: none; opacity: calc(0.4 * var(--t-scanlines, 1)); }
     .noise-overlay { display: none; }
+}
+
+/* Consistent keyboard visibility across themes. Many controls intentionally
+   remove the browser's default outline, so restore an unmistakable focus ring
+   at the system level without showing it for pointer clicks. */
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+    outline: 2px solid var(--t-accent, var(--nc-red));
+    outline-offset: 3px;
+}
+
+.sr-only {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
+@media (forced-colors: active) {
+    :where(button, a, input, textarea, select, [tabindex]):focus-visible {
+        outline-color: Highlight;
+    }
+    .sync-dot { forced-color-adjust: none; border: 1px solid CanvasText; }
 }
 
 /* ── App Title (neutral base) ──────────────────────────────── */
@@ -1007,6 +1040,49 @@ body {
 .folder-card:hover {
     border-color: var(--t-card-hover-border, rgba(0, 245, 255, 0.4));
     box-shadow: 0 0 16px rgba(0, 0, 0, 0.06);
+}
+
+/* Placeholder cards shown while the first vault listing is in flight, so a
+   browser that has never synced doesn't claim the vault is empty. */
+.folder-card-skeleton {
+    cursor: default;
+    pointer-events: none;
+    opacity: 0.55;
+}
+
+.folder-card-skeleton:hover {
+    border-color: var(--t-card-border, rgba(0, 245, 255, 0.12));
+    box-shadow: none;
+}
+
+.folder-card-skeleton .folder-icon {
+    opacity: 0.35;
+}
+
+.skeleton-bar {
+    display: block;
+    height: 0.7em;
+    width: 9rem;
+    max-width: 60%;
+    border-radius: 2px;
+    background: currentColor;
+    opacity: 0.16;
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.skeleton-bar-short {
+    width: 4rem;
+    margin-top: 0.35rem;
+    animation-delay: 0.2s;
+}
+
+@keyframes skeleton-pulse {
+    0%, 100% { opacity: 0.10; }
+    50%      { opacity: 0.24; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .skeleton-bar { animation: none; }
 }
 
 .folder-icon {
@@ -2880,7 +2956,7 @@ body {
     .theme-dropdown-item { min-height: 44px; }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 600px), (max-height: 500px) and (pointer: coarse) and (max-width: 950px) {
     /* Header */
     .app-header {
         gap: 0.4rem;
@@ -4945,4 +5021,214 @@ body {
 .settings-toggle input:checked + .settings-toggle-slider::before {
     transform: translateX(20px);
     background: var(--nc-bg-void, #000);
+}
+
+/* ── iPhone Markdown editor ────────────────────────────────────
+   Treat formatting as a keyboard accessory instead of a desktop toolbar
+   squeezed into a phone. The writing canvas stays primary; common formatting
+   remains one thumb tap away and the rest expands in place. */
+@media (max-width: 600px), (max-height: 500px) and (pointer: coarse) and (max-width: 950px) {
+    .editor-zone {
+        gap: 0.45rem;
+        overflow: hidden;
+        padding-bottom: 0;
+    }
+
+    .editor-toolbar { order: 1; }
+    .editor-body { order: 2; }
+    .editor-footer {
+        order: 3;
+        min-height: 20px;
+        padding-inline: 0.15rem;
+    }
+    .format-toolbar { order: 4; }
+
+    /* The app header already supplies Back; Settings retains the autosave
+       control. Removing their duplicates gives the note another full line. */
+    .editor-back-btn,
+    .editor-toolbar .autosave-toggle {
+        display: none;
+    }
+
+    .editor-actions {
+        display: flex;
+        flex-wrap: nowrap;
+        width: 100%;
+        min-width: 0;
+    }
+    .mode-toggle {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+    .mode-btn {
+        min-width: 72px;
+    }
+    .editor-actions .save-status {
+        margin-inline-start: auto;
+        max-width: 5rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    #save-btn {
+        flex: 0 0 auto;
+        min-width: 72px;
+    }
+
+    .editor-body,
+    .editor-pane,
+    .cyber-textarea.editor-textarea {
+        min-height: 0;
+    }
+    .cyber-textarea.editor-textarea {
+        padding: 0.9rem;
+        font-size: 16px;
+        line-height: 1.65;
+        border-radius: 3px;
+        overscroll-behavior: contain;
+        scroll-padding-block: 4rem;
+    }
+
+    .format-toolbar {
+        position: relative;
+        bottom: auto;
+        display: flex;
+        flex: 0 0 auto;
+        flex-wrap: nowrap;
+        align-items: center;
+        gap: 3px;
+        width: 100%;
+        min-width: 0;
+        min-height: 52px;
+        margin: 0;
+        padding: 4px;
+        padding-bottom: max(4px, env(safe-area-inset-bottom));
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+        overscroll-behavior-x: contain;
+        scroll-snap-type: x proximity;
+        -webkit-overflow-scrolling: touch;
+        border-radius: 4px 4px 0 0;
+    }
+    .format-toolbar::-webkit-scrollbar { display: none; }
+
+    .format-toolbar .fmt-btn {
+        display: inline-flex;
+        flex: 0 0 auto;
+        min-width: 48px;
+        min-height: 44px;
+        padding: 0.35rem 0.6rem;
+        scroll-snap-align: start;
+        font-size: 0.86rem;
+    }
+    .format-toolbar:not(.fmt-expanded) .fmt-btn[data-fmt="ul"],
+    .format-toolbar:not(.fmt-expanded) .fmt-btn[data-fmt="task"],
+    .format-toolbar:not(.fmt-expanded) .fmt-btn[data-fmt="link"] {
+        font-size: 0;
+    }
+    .format-toolbar:not(.fmt-expanded) .fmt-btn[data-fmt="ul"]::after {
+        content: "\2022";
+        font-size: 1.15rem;
+    }
+    .format-toolbar:not(.fmt-expanded) .fmt-btn[data-fmt="task"]::after {
+        content: "\2610";
+        font-size: 1rem;
+    }
+    .format-toolbar:not(.fmt-expanded) .fmt-btn[data-fmt="link"]::after {
+        content: "[]()";
+        font-size: 0.78rem;
+    }
+    .format-toolbar .fmt-sep { display: none; }
+
+    /* One-row essentials: emphasis, hierarchy, lists, links, and code. */
+    .format-toolbar .fmt-btn[data-fmt="strikethrough"],
+    .format-toolbar .fmt-btn[data-fmt="h1"],
+    .format-toolbar .fmt-btn[data-fmt="h3"],
+    .format-toolbar .fmt-btn[data-fmt="code"],
+    .format-toolbar .fmt-btn[data-fmt="codeblock"],
+    .format-toolbar .fmt-btn[data-fmt="quote"],
+    .format-toolbar .fmt-btn[data-fmt="ol"],
+    .format-toolbar .fmt-btn[data-fmt="image"],
+    .format-toolbar .fmt-btn[data-fmt="hr"],
+    .format-toolbar .fmt-btn[data-fmt="table"],
+    .format-toolbar .fmt-btn[data-fmt="wikilink"],
+    .format-toolbar .fmt-btn[data-fmt="tag"],
+    .format-toolbar .fmt-btn[data-fmt="callout"],
+    .format-toolbar .fmt-btn[data-fmt="highlight"],
+    .format-toolbar .fmt-btn[data-fmt="footnote"] {
+        display: none;
+    }
+
+    .format-toolbar .fmt-more-btn {
+        position: sticky;
+        right: 0;
+        z-index: 2;
+        display: inline-flex;
+        flex: 0 0 48px;
+        min-width: 48px;
+        margin-inline-start: auto;
+        background: var(--t-card-bg, var(--nc-bg-dark));
+        border-color: var(--t-card-border, var(--nc-red-dim));
+        box-shadow: -10px 0 10px var(--t-card-bg, var(--nc-bg-dark));
+    }
+
+    .format-toolbar.fmt-expanded {
+        flex-wrap: wrap;
+        align-content: flex-start;
+        max-height: min(38dvh, 196px);
+        overflow-x: hidden;
+        overflow-y: auto;
+        scroll-snap-type: none;
+    }
+    .format-toolbar.fmt-expanded .fmt-btn {
+        display: inline-flex;
+        flex: 1 0 calc(20% - 4px);
+    }
+    .format-toolbar.fmt-expanded .fmt-more-btn {
+        position: sticky;
+        right: 0;
+        bottom: 0;
+        flex: 0 0 48px;
+        margin-inline-start: auto;
+    }
+
+    /* Once the software keyboard is visible, prioritize the active line and
+       keep only the controls needed during the writing session. */
+    .editor-zone.keyboard-open .title-input,
+    .editor-zone.keyboard-open .editor-footer {
+        display: none;
+    }
+    .editor-zone.keyboard-open .editor-toolbar {
+        gap: 0;
+    }
+
+    .app-shell:has(.editor-zone.keyboard-open) .app-header {
+        display: none;
+    }
+
+    /* Preview is for reading; formatting actions only apply to the editor. */
+    .editor-zone[data-mode="preview"] .format-toolbar {
+        display: none;
+    }
+}
+
+@media (max-height: 650px) and (max-width: 600px) {
+    .app-main:has(.editor-zone) { padding-block: 0.5rem; }
+    .editor-footer { display: none; }
+}
+
+/* Landscape iPhone keyboards leave very little vertical room. The accessory
+   bar remains available, while expanded formatting is capped to two rows. */
+@media (max-height: 500px) and (max-width: 900px) {
+    .app-main:has(.editor-zone) { padding-block: 0.45rem; }
+    .editor-zone { gap: 0.35rem; }
+    .editor-toolbar {
+        flex-direction: row;
+        align-items: center;
+        gap: 0.45rem;
+    }
+    .editor-toolbar .title-input { min-width: 12rem; }
+    .editor-footer { display: none; }
+    .editor-zone.keyboard-open .editor-toolbar { display: none; }
+    .format-toolbar.fmt-expanded { max-height: 104px; }
 }

@@ -3,11 +3,12 @@
 <head>
     <meta charset="UTF-8" />
 
-    <!-- Use Brain.png from /public folder -->
-    <link rel="icon" type="image/png" href="/Brain.png" />
+    <!-- Properly sized icons. The favicon used to be the full 310KB, 638x513
+         Brain.png, downloaded on every cold visit to be drawn at 16px. -->
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png" />
 
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
-    <title>THOUGHTS.EXE // NIGHT CITY</title>
+    <title>Thoughts</title>
 
     <!-- iOS / PWA: Add-to-Home-Screen, safe-area insets, status bar -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -15,22 +16,34 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Thoughts" />
     <meta name="theme-color" content="#050508" />
-    <link rel="apple-touch-icon" href="/Brain.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.json" />
+
+    <!-- Open the connections the app needs first thing, so the DNS lookup and TLS
+         handshake for Firebase overlap with downloading the bundle instead of
+         happening after it. Biggest single win on a browser that has never been
+         here before. -->
+    <link rel="preconnect" href="https://firebasestorage.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin>
+    <link rel="dns-prefetch" href="https://firebasestorage.googleapis.com">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400&family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <!-- KaTeX for math rendering -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-    <!-- Highlight.js for code syntax highlighting -->
-    <link rel="stylesheet" id="hljs-theme" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
-    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
-    <!-- Mermaid for diagrams -->
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <!-- Fonts load without blocking the first paint: the page renders in the
+         fallback face and swaps when the webfont lands. -->
+    <link rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400&family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap"
+          media="print" onload="this.media='all'">
+    <noscript>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400&family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap">
+    </noscript>
+
+    <!-- marked, KaTeX, highlight.js and Mermaid used to be blocking <script> tags
+         here — well over a megabyte fetched and parsed before the app could paint,
+         on every first visit, even for a note with no code, math or diagrams.
+         They now load on demand from src/lazy.js when a preview actually needs
+         them. Do not put them back in <head>. -->
 </head>
 
 <body>

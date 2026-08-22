@@ -35,7 +35,7 @@ export class AuthController {
 
                 <form class="auth-form${startRevealed ? '' : ' auth-form-hidden'}" id="auth-form">
                     <div class="field-group">
-                        <label class="field-label">Email</label>
+                        <label class="field-label" for="auth-email">Email</label>
                         <input
                             type="email"
                             id="auth-email"
@@ -47,12 +47,13 @@ export class AuthController {
                             autocorrect="off"
                             spellcheck="false"
                             inputmode="email"
+                            aria-describedby="auth-error"
                             required
                         />
                     </div>
 
                     <div class="field-group">
-                        <label class="field-label">Password</label>
+                        <label class="field-label" for="auth-password">Password</label>
                         <input
                             type="password"
                             id="auth-password"
@@ -60,11 +61,12 @@ export class AuthController {
                             class="cyber-input"
                             placeholder="••••••••••"
                             autocomplete="${passwordAutocomplete}"
+                            aria-describedby="auth-error"
                             required
                         />
                     </div>
 
-                    <div id="auth-error" class="auth-error hidden"></div>
+                    <div id="auth-error" class="auth-error hidden" role="alert" aria-live="polite"></div>
 
                     <button type="submit" class="cyber-btn primary-btn" id="auth-submit">
                         <span class="btn-text">${submitLabel}</span>
@@ -162,6 +164,10 @@ export class AuthController {
             clearTimeout(this._cycleTimer)
             this._cycleTimer = null
         }
+    }
+
+    destroy() {
+        this._stopPromptAnimation()
     }
 
     _revealForm() {

@@ -4,6 +4,8 @@ import { ThoughtCollector } from './app.js'
 import { auth, setSessionExpiredHandler, enableMobileRefreshHandlers } from './api.js'
 
 const appEl = document.querySelector('#app')
+let activeApp = null
+let activeAuth = null
 
 function applySavedTheme() {
     const saved = localStorage.getItem('nc_theme') || 'system'
@@ -17,25 +19,31 @@ function applySavedTheme() {
 }
 
 function showAuthView() {
+    if (activeApp) { activeApp.destroy(); activeApp = null }
+    if (activeAuth) activeAuth.destroy()
     applySavedTheme()
-    const controller = new AuthController(appEl, () => showAppView(), () => showDocs())
-    controller.render()
+    activeAuth = new AuthController(appEl, () => showAppView(), () => showDocs())
+    activeAuth.render()
 }
 
 function showAppView() {
+    if (activeAuth) { activeAuth.destroy(); activeAuth = null }
+    if (activeApp) activeApp.destroy()
     // Re-check sync when the tab returns to the foreground or the network
     // comes back — background timers get suspended on mobile. (Auth token
     // refresh is handled inside the Firebase SDK.)
     enableMobileRefreshHandlers()
-    new ThoughtCollector(appEl, () => showAuthView())
+    activeApp = new ThoughtCollector(appEl, () => showAuthView())
 }
 
 function showDocs() {
+    if (activeApp) { activeApp.destroy(); activeApp = null }
+    if (activeAuth) { activeAuth.destroy(); activeAuth = null }
     applySavedTheme()
     appEl.innerHTML = `
         <div class="docs-page">
             <header class="docs-header">
-                <button class="docs-back" id="docs-back-btn">&larr; back</button>
+                <button type="button" class="docs-back" id="docs-back-btn">&larr; back</button>
                 <h1>thoughts</h1>
             </header>
             <div class="docs-body">
@@ -60,14 +68,9 @@ function showDocs() {
                     </ul>
                 </section>
                 <section>
-                    <h2>obsidian sync</h2>
-                    <p>import your entire obsidian vault in one click. hit "Import vault" on the folders page or open the command palette (<code>Ctrl/Cmd + P</code>) and run "Import Obsidian Vault". pick your vault folder and all your .md files come in, folder structure intact. <code>.obsidian</code> config is skipped automatically.</p>
-                    <p style="margin-top: 0.6rem;">for live two-way sync, use the CLI tool:</p>
-                    <div class="docs-code">
-                        <code>pip install watchdog requests</code>
-                        <code>python vault_sync.py --vault ~/my-vault --token YOUR_JWT</code>
-                    </div>
-                    <p style="margin-top: 0.4rem;">this watches your local vault for changes and syncs both ways every 30 seconds.</p>
+                    <h2>obsidian import</h2>
+                    <p>import your entire obsidian vault in one click. hit “Import vault” on the folders page or open the command palette (<code>Ctrl/Cmd + P</code>) and run “Import Obsidian Vault”. pick your vault folder and all Markdown files come in with their folder structure intact. <code>.obsidian</code> and <code>.trash</code> are skipped automatically.</p>
+                    <p style="margin-top: 0.6rem;">imports are one-way snapshots. after import, the browser app syncs your notes through your private cloud vault.</p>
                 </section>
                 <section>
                     <h2>keys</h2>

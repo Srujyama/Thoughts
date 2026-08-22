@@ -1,5 +1,7 @@
 // src/app.js
-import { foldersAPI, filesAPI, auth, vaultAPI, syncStatus, offlineQueue } from './api.js'
+import { foldersAPI, filesAPI, auth, vaultAPI, syncStatus, offlineQueue, contentFor, cacheReady } from './api.js'
+import { ensureMarked, ensureHljs, ensureKatex, ensureMermaid, warmMarked, needsMath } from './lazy.js'
+import DOMPurify from 'dompurify'
 
 const EDITOR_MODE_KEY     = 'nc_editor_mode'
 const THEME_KEY           = 'nc_theme'
@@ -31,26 +33,46 @@ function _resolveSystemTheme() {
 }
 
 // ── Hash routing helpers ──────────────────────────────────────
-function pushHash(folderPath, fileId) {
+// The note part of the hash is the file's slug (its storage basename), not its
+// local id. Ids are minted with crypto.randomUUID() by whichever browser first
+// syncs a note, so an id-based URL is meaningless anywhere else — reloading a
+// note in a fresh browser could never reopen that note, only its folder.
+// Slugs come from the storage path, so they're the same everywhere.
+function fileSlugOf(file) {
+    if (!file) return null
+    if (file.path) return file.path.split('/').pop().replace(/\.md$/, '')
+    return file.id || null
+}
+
+function pushHash(folderPath, fileRef) {
     let hash
     if (!folderPath) {
         hash = '#/'
-    } else if (!fileId) {
+    } else if (!fileRef) {
         hash = '#/' + folderPath
     } else {
-        hash = '#/' + folderPath + '//' + fileId
+        hash = '#/' + folderPath + '//' + fileRef
     }
     if (location.hash !== hash) history.pushState(null, '', hash)
 }
 
 function readHash() {
     const raw = location.hash.replace(/^#\/?/, '')
-    if (!raw) return { folderPath: null, fileId: null }
+    if (!raw) return { folderPath: null, fileRef: null }
     const sep = raw.indexOf('//')
     if (sep !== -1) {
-        return { folderPath: raw.slice(0, sep) || null, fileId: raw.slice(sep + 2) || null }
+        return { folderPath: raw.slice(0, sep) || null, fileRef: raw.slice(sep + 2) || null }
     }
-    return { folderPath: raw || null, fileId: null }
+    return { folderPath: raw || null, fileRef: null }
+}
+
+// Resolve the note part of a hash. Accepts a slug (what we write now) or a raw
+// id (older bookmarks and in-session history entries).
+function findFileByRef(folder, ref) {
+    if (!folder || !ref) return null
+    return folder.files.find(f => fileSlugOf(f) === ref)
+        || folder.files.find(f => f.id === ref)
+        || null
 }
 
 export class ThoughtCollector {
@@ -83,6 +105,14 @@ export class ThoughtCollector {
         this._starred = new Set(JSON.parse(localStorage.getItem(STARRED_KEY) || '[]'))
         // Recent files [{folderId, fileId, title}] (max 10)
         this._recent = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]')
+        // Document-level listeners owned by the current shell (see _onDocument)
+        this._docListeners = []
+        // Cold-boot state: on a browser that has never synced, local meta is
+        // empty and every view has to distinguish "nothing here" from "not
+        // loaded yet". Must be set before _restoreFromHash runs.
+        this._hasSynced = foldersAPI.list().length > 0
+        this._syncFailed = false
+        this._pendingHash = null
         // Outline panel open state
         this._outlineOpen = false
         // Backlinks panel open state
@@ -93,7 +123,8 @@ export class ThoughtCollector {
         this._applyTheme(savedTheme)
 
         this._restoreFromHash()
-        window.addEventListener('popstate', () => this._restoreFromHash())
+        this._popstateHandler = () => this._restoreFromHash()
+        window.addEventListener('popstate', this._popstateHandler)
 
         // Global keyboard shortcuts
         this._globalKeyHandler = (e) => {
@@ -156,6 +187,18 @@ export class ThoughtCollector {
         window.addEventListener('pagehide', this._pagehideHandler)
         window.addEventListener('beforeunload', this._beforeunloadHandler)
 
+        // Start fetching the markdown renderer now — every preview needs it, and
+        // downloading it alongside the vault listing keeps it off the critical
+        // path without making the first preview wait for a cold fetch.
+        warmMarked()
+
+        // Loading the note cache out of IndexedDB is asynchronous, so a panel
+        // that reads note bodies can render before it lands and come up empty.
+        // Repaint it once the cache is actually there.
+        cacheReady.then(() => {
+            if (this._backlinksOpen && this.view === 'editor') this._updateBacklinksPanel()
+        }).catch(() => {})
+
         // Start sync status polling
         syncStatus.startPolling()
 
@@ -217,18 +260,28 @@ export class ThoughtCollector {
         if (this._beforeunloadHandler) window.removeEventListener('beforeunload', this._beforeunloadHandler)
     }
 
-    async _triggerAutologout() {
+    destroy() {
+        document.removeEventListener('keydown', this._escHandler)
+        document.removeEventListener('keydown', this._globalKeyHandler)
+        if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler)
+        this._removeLifecycleHandlers()
+        this._clearDocumentListeners()
         this._clearAutologoutTimer()
+        clearTimeout(this._autosaveTimer)
+        clearTimeout(this._previewTimer)
+        if (this._vvCleanup) { this._vvCleanup(); this._vvCleanup = null }
+        if (this._syncUnsub) { this._syncUnsub(); this._syncUnsub = null }
         if (this._autologoutActivityHandler) {
             const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll']
             events.forEach(ev => document.removeEventListener(ev, this._autologoutActivityHandler, true))
             this._autologoutActivityHandler = null
         }
-        document.removeEventListener('keydown', this._escHandler)
-        document.removeEventListener('keydown', this._globalKeyHandler)
-        this._removeLifecycleHandlers()
         syncStatus.stopPolling()
-        if (this._syncUnsub) this._syncUnsub()
+        document.querySelectorAll('.modal-overlay, .move-menu-overlay').forEach(el => el.remove())
+    }
+
+    async _triggerAutologout() {
+        this.destroy()
         try { await auth.logout() } catch (e) { /* ignore */ }
         this._toast('Logged out due to inactivity')
         this.onLogout()
@@ -296,10 +349,21 @@ export class ThoughtCollector {
         }
     }
 
-    _isMobile() { return window.innerWidth <= 768 }
+    _isMobile() {
+        // Width alone misclassifies modern iPhones in landscape (up to 932px)
+        // as desktop. Keep the desktop layout for short laptop windows by also
+        // requiring touch input for the landscape exception.
+        const touchLandscape = window.innerWidth <= 950
+            && window.innerHeight <= 500
+            && (navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches)
+        return window.innerWidth <= 768 || touchLandscape
+    }
 
     // ── Routing ───────────────────────────────────────────────
     _navigate(view, { folder, file } = {}) {
+        // A deliberate navigation overrides wherever the cold-boot URL was
+        // headed — don't teleport the user afterwards.
+        this._pendingHash = null
         this.view = view
         if (folder !== undefined) this.currentFolder = folder
         if (file   !== undefined) this.currentFile   = file
@@ -312,16 +376,17 @@ export class ThoughtCollector {
             this.currentFile = null
             pushHash(this.currentFolder.path, null)
         } else if (view === 'editor' && this.currentFolder && this.currentFile) {
-            pushHash(this.currentFolder.path, this.currentFile.id)
+            pushHash(this.currentFolder.path, fileSlugOf(this.currentFile))
         }
         this._render()
     }
 
     _restoreFromHash() {
-        const { folderPath, fileId } = readHash()
+        const { folderPath, fileRef } = readHash()
         const allFolders = foldersAPI.list()
 
         if (!folderPath) {
+            this._pendingHash = null
             this.view = 'folders'
             this.currentFolder = null
             this.currentFile   = null
@@ -331,27 +396,50 @@ export class ThoughtCollector {
 
         const folder = allFolders.find(f => f.path === folderPath)
         if (!folder) {
+            // On a browser that has never synced, meta is empty, so EVERY
+            // deep link lands here and silently drops the user at the folder
+            // grid — reloading the tab on an open note used to mean navigating
+            // back down two levels by hand. Remember where they were headed and
+            // resolve it once the first listing arrives.
+            if (!this._hasSynced) this._pendingHash = { folderPath, fileRef }
             this.view = 'folders'
             this._render()
             return
         }
 
+        this._pendingHash = null
         this.currentFolder = folder
 
-        if (!fileId) {
+        if (!fileRef) {
             this.view = 'files'
             this._render()
             return
         }
 
-        const file = folder.files.find(f => f.id === fileId)
+        const file = findFileByRef(folder, fileRef)
         if (!file) {
+            if (!this._hasSynced) this._pendingHash = { folderPath, fileRef }
             this.view = 'files'
             this._render()
             return
         }
 
         this._openFile(file)
+    }
+
+    // After the first cloud listing lands, finish the navigation the cold boot
+    // couldn't. Runs at most once, and only if the user hasn't gone somewhere
+    // else in the meantime — being teleported out of whatever you just opened
+    // would be worse than the problem it fixes.
+    _resolvePendingHash() {
+        const pending = this._pendingHash
+        if (!pending) return
+        this._pendingHash = null
+        if (this.view !== 'folders' && this.view !== 'files') return
+        const now = readHash()
+        if (now.folderPath !== pending.folderPath || now.fileRef !== pending.fileRef) return
+        if (!foldersAPI.list().some(f => f.path === pending.folderPath)) return
+        this._restoreFromHash()
     }
 
     // ── Top-level render dispatcher ───────────────────────────
@@ -385,7 +473,7 @@ export class ThoughtCollector {
                     <span class="sidebar-title">Folders</span>
                     <button class="sidebar-new-btn" id="sidebar-new-folder" title="New folder">+</button>
                 </div>
-                <div class="sidebar-list">${sidebarHtml || '<p class="sidebar-empty">No folders yet</p>'}</div>
+                <div class="sidebar-list">${sidebarHtml || this._sidebarEmpty()}</div>
                 <div class="sidebar-footer">
                     <button class="sidebar-settings-btn" id="sidebar-settings-btn" title="Settings">
                         <span class="sidebar-settings-icon">&#9881;</span>
@@ -399,7 +487,7 @@ export class ThoughtCollector {
             <div class="app-shell">
                 <header class="app-header">
                     <div class="header-left">
-                        ${sidebar ? `<button class="mobile-hamburger" id="mobile-menu-btn" title="Menu" aria-label="Open folder menu">
+                        ${sidebar ? `<button class="mobile-hamburger" id="mobile-menu-btn" title="Menu" aria-label="Open folder menu" aria-expanded="false" aria-controls="app-sidebar">
                             <span></span><span></span><span></span>
                         </button>` : ''}
                         <button class="breadcrumb-back-btn" id="breadcrumb-back" title="Back" aria-label="Back">&larr;</button>
@@ -430,8 +518,8 @@ export class ThoughtCollector {
                             </button>
                         </div>
                         <div class="header-overflow" id="header-overflow">
-                            <button class="header-overflow-btn" id="header-overflow-btn" title="More" aria-label="More options">&#8942;</button>
-                            <div class="header-overflow-menu" id="header-overflow-menu">
+                            <button class="header-overflow-btn" id="header-overflow-btn" title="More" aria-label="More options" aria-expanded="false" aria-controls="header-overflow-menu">&#8942;</button>
+                            <div class="header-overflow-menu" id="header-overflow-menu" role="menu">
                                 <button class="overflow-item" id="overflow-graph">Graph view</button>
                                 <button class="overflow-item" id="overflow-cmd">Command palette</button>
                                 <button class="overflow-item" id="overflow-theme">Theme</button>
@@ -547,7 +635,37 @@ export class ThoughtCollector {
         return `<div class="empty-state"><p class="empty-headline loading-text">${message}</p></div>`
     }
 
+    // An empty sidebar on a browser that has never synced means "not loaded
+    // yet", not "you have no folders" — don't assert the second one.
+    _sidebarEmpty() {
+        return this._hasSynced
+            ? '<p class="sidebar-empty">No folders yet</p>'
+            : '<p class="sidebar-empty loading-text">Loading…</p>'
+    }
+
+    // Register a document-level listener that belongs to the current shell, so
+    // the next render can take it back down. Every navigation used to leave two
+    // more anonymous click handlers on `document`, each closing over a detached
+    // menu element — they piled up for the life of the session and every click
+    // ran all of them.
+    _onDocument(type, handler) {
+        document.addEventListener(type, handler)
+        this._docListeners.push([type, handler])
+    }
+
+    _clearDocumentListeners() {
+        if (this._docListeners) {
+            this._docListeners.forEach(([type, fn]) => document.removeEventListener(type, fn))
+        }
+        this._docListeners = []
+    }
+
     _bindShell() {
+        // The shell is rebuilt from scratch on every render; drop the previous
+        // one's document listeners before installing this one's.
+        this._clearDocumentListeners()
+        if (this._vvCleanup) { this._vvCleanup(); this._vvCleanup = null }
+
         // Sync status indicator
         this._updateSyncUI(syncStatus.get())
         if (this._syncUnsub) this._syncUnsub()
@@ -567,7 +685,10 @@ export class ThoughtCollector {
         this._closeDrawer = () => {
             if (drawer) drawer.classList.remove('open')
             if (scrim) scrim.classList.remove('open')
-            if (hamburger) hamburger.classList.remove('open')
+            if (hamburger) {
+                hamburger.classList.remove('open')
+                hamburger.setAttribute('aria-expanded', 'false')
+            }
         }
         if (hamburger && drawer && scrim) {
             hamburger.addEventListener('click', () => {
@@ -575,6 +696,7 @@ export class ThoughtCollector {
                 drawer.classList.toggle('open', open)
                 scrim.classList.toggle('open', open)
                 hamburger.classList.toggle('open', open)
+                hamburger.setAttribute('aria-expanded', String(open))
             })
             scrim.addEventListener('click', () => this._closeDrawer())
         }
@@ -585,16 +707,22 @@ export class ThoughtCollector {
         if (overflowBtn && overflowMenu) {
             overflowBtn.addEventListener('click', (e) => {
                 e.stopPropagation()
-                overflowMenu.classList.toggle('open')
+                const open = overflowMenu.classList.toggle('open')
+                overflowBtn.setAttribute('aria-expanded', String(open))
             })
-            document.addEventListener('click', (e) => {
+            this._onDocument('click', (e) => {
                 if (!overflowMenu.contains(e.target) && e.target !== overflowBtn) {
                     overflowMenu.classList.remove('open')
+                    overflowBtn.setAttribute('aria-expanded', 'false')
                 }
             })
             const route = (id, fn) => {
                 const el = this.container.querySelector(id)
-                if (el) el.addEventListener('click', () => { overflowMenu.classList.remove('open'); fn() })
+                if (el) el.addEventListener('click', () => {
+                    overflowMenu.classList.remove('open')
+                    overflowBtn.setAttribute('aria-expanded', 'false')
+                    fn()
+                })
             }
             // Overflow items delegate to the real (desktop-hidden) controls / handlers
             route('#overflow-graph', () => this._showGraphView())
@@ -627,17 +755,7 @@ export class ThoughtCollector {
 
         // Logout
         this.container.querySelector('#logout-btn').addEventListener('click', async () => {
-            document.removeEventListener('keydown', this._escHandler)
-            document.removeEventListener('keydown', this._globalKeyHandler)
-            this._removeLifecycleHandlers()
-            syncStatus.stopPolling()
-            if (this._syncUnsub) this._syncUnsub()
-            this._clearAutologoutTimer()
-            if (this._autologoutActivityHandler) {
-                const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll']
-                events.forEach(ev => document.removeEventListener(ev, this._autologoutActivityHandler, true))
-                this._autologoutActivityHandler = null
-            }
+            this.destroy()
             await auth.logout()
             this.onLogout()
         })
@@ -676,7 +794,7 @@ export class ThoughtCollector {
                 themeDropdown.classList.toggle('open')
             })
             // Close dropdown when clicking outside
-            document.addEventListener('click', (e) => {
+            this._onDocument('click', (e) => {
                 if (!themeDropdown.contains(e.target) && e.target !== themeToggleBtn) {
                     themeDropdown.classList.remove('open')
                 }
@@ -834,7 +952,7 @@ export class ThoughtCollector {
         // Re-render just the sidebar list
         const sidebarList = this.container.querySelector('.sidebar-list')
         if (sidebarList) {
-            sidebarList.innerHTML = this._buildSidebarTree(null, 0) || '<p class="sidebar-empty">No folders yet</p>'
+            sidebarList.innerHTML = this._buildSidebarTree(null, 0) || this._sidebarEmpty()
             // Re-bind sidebar events
             this.container.querySelectorAll('.sidebar-folder').forEach(btn => {
                 btn.addEventListener('click', async (e) => {
@@ -883,12 +1001,34 @@ export class ThoughtCollector {
 
     // ── Folders view (root level) ──────────────────────────────
     _renderFolders() {
-        pushHash(null, null)
-        const folders = foldersAPI.listRoots()
-        this._paintFolders(folders)
+        // Keep the URL intact while a cold-boot destination is still pending —
+        // rewriting it to "#/" here would erase the note the user asked for
+        // before the listing arrives to resolve it.
+        if (!this._pendingHash) pushHash(null, null)
+        this._paintFolders(foldersAPI.listRoots())
+
+        let retried = false
         const doSync = () => foldersAPI.listFromCloud()
-            .then(() => { if (this.view === 'folders') this._paintFolders(foldersAPI.listRoots()) })
-        doSync().catch(() => setTimeout(() => doSync().catch(() => {}), 5000))
+            .then(() => {
+                this._hasSynced = true
+                this._syncFailed = false
+                if (this.view === 'folders') this._paintFolders(foldersAPI.listRoots())
+                this._resolvePendingHash()
+            })
+            .catch(err => {
+                if (retried) {
+                    // Out of retries: say so. Falling back to the empty state
+                    // would claim the vault is empty when we simply couldn't
+                    // reach it.
+                    this._syncFailed = true
+                    if (this.view === 'folders') this._paintFolders(foldersAPI.listRoots())
+                    return
+                }
+                retried = true
+                setTimeout(doSync, 5000)
+                throw err
+            })
+        doSync().catch(() => {})
     }
 
     _paintFolders(folders) {
@@ -907,6 +1047,28 @@ export class ThoughtCollector {
                     </div>
                 </div>
             `).join('')
+            // Nothing to show yet. Which of the three reasons matters: a
+            // browser that has never synced has an empty meta store, and
+            // claiming "No folders yet" there tells the user their vault is
+            // empty while it is still loading.
+            : !this._hasSynced && !this._syncFailed
+                ? Array.from({ length: 3 }, () => `
+                    <div class="folder-card folder-card-skeleton" aria-hidden="true">
+                        <div class="folder-icon">▶</div>
+                        <div class="folder-info">
+                            <span class="folder-name skeleton-bar"></span>
+                            <span class="folder-meta skeleton-bar skeleton-bar-short"></span>
+                        </div>
+                    </div>
+                `).join('')
+            : this._syncFailed
+                ? `<div class="empty-state">
+                    <p class="empty-headline">Couldn't reach your vault</p>
+                    <p class="empty-sub">Check your connection — your notes are safe.</p>
+                    <button class="cyber-btn compact-btn" id="retry-sync-btn" style="margin-top:1rem;">
+                        <span class="btn-text">Retry</span><span class="btn-glow"></span>
+                    </button>
+                   </div>`
             : `<div class="empty-state">
                 <p class="empty-headline">No folders yet</p>
                 <p class="empty-sub">Create a folder to get started</p>
@@ -935,6 +1097,12 @@ export class ThoughtCollector {
 
         this.container.querySelector('#new-folder-btn').addEventListener('click', () => {
             this._promptNewFolder(null)
+        })
+
+        const retryBtn = this.container.querySelector('#retry-sync-btn')
+        if (retryBtn) retryBtn.addEventListener('click', () => {
+            this._syncFailed = false
+            this._renderFolders()
         })
 
         // Upload folder(s) to root
@@ -974,6 +1142,18 @@ export class ThoughtCollector {
 
         // Drag-and-drop reordering / reparenting on folder cards
         this._bindFolderDragDrop(this.container.querySelector('#folder-grid'), 'root')
+    }
+
+    // Once a folder's contents are on screen, pull its notes down and fill in
+    // their timestamps. The user is reading filenames for a second or two —
+    // that's exactly the window in which to make the note they're about to
+    // click already local.
+    _warmFolder(folder) {
+        if (!folder) return
+        foldersAPI.prefetchFolder(folder.id).catch(() => {})
+        foldersAPI.backfillTimes(folder.id, (f) => {
+            if (this.view === 'files' && this.currentFolder?.id === f.id) this._paintFiles()
+        }).catch(() => {})
     }
 
     async _promptNewFolder(parentId) {
@@ -1090,6 +1270,7 @@ export class ThoughtCollector {
         if (!this.currentFolder) { this._navigate('folders'); return }
         pushHash(this.currentFolder.path, null)
         this._paintFiles()
+        this._warmFolder(this.currentFolder)
     }
 
     _paintFiles() {
@@ -1546,9 +1727,10 @@ export class ThoughtCollector {
             }).join('')
 
             overlay.innerHTML = `
-                <div class="move-menu-box">
-                    <div class="move-menu-title">${title}</div>
-                    <input type="text" class="move-menu-search" placeholder="Search folders...">
+                <div class="move-menu-box" role="dialog" aria-modal="true" aria-labelledby="move-menu-title">
+                    <div class="move-menu-title" id="move-menu-title">${this._esc(title)}</div>
+                    <label class="sr-only" for="move-menu-search">Search folders</label>
+                    <input type="text" id="move-menu-search" class="move-menu-search" placeholder="Search folders...">
                     <div class="move-menu-list">${rootOption}${folderItems}</div>
                     <div class="move-menu-actions">
                         <button class="modal-btn modal-cancel">CANCEL</button>
@@ -1702,33 +1884,38 @@ export class ThoughtCollector {
         this.currentFile = file
         this.view = 'editor'
         this.editorDirty = false
-        pushHash(this.currentFolder.path, file.id)
+        pushHash(this.currentFolder.path, fileSlugOf(file))
         // Track in recent files
         this._addRecent(this.currentFolder.id, file.id, file.title)
 
-        // If content is already loaded (cached), render editor immediately
-        if (file.contentLoaded && file.content) {
+        // A note we already hold — just created, opened earlier this session, or
+        // pulled down by the background prefetch — can be filled in from the
+        // persistent cache synchronously, so the editor paints on this frame
+        // instead of showing a spinner while the network answers.
+        if (!file.contentLoaded) filesAPI.peekCached(this.currentFolder.id, file.id)
+
+        // Called if the cloud copy turns out to differ from what we rendered.
+        const applyFresh = (loaded) => {
+            if (this.view !== 'editor' || !this.currentFile || this.currentFile.id !== file.id) return
+            if (this.editorDirty) return
+            this.currentFile = loaded
+            const contentArea = this.container.querySelector('#file-content')
+            const preview = this.container.querySelector('#editor-preview')
+            if (contentArea) {
+                contentArea.value = loaded.content || ''
+                if (preview) this._renderPreview(preview, contentArea.value)
+            }
+        }
+
+        if (file.contentLoaded) {
             this._renderEditor()
-            // Still refresh from cloud in background for freshness
-            filesAPI.loadContent(this.currentFolder.id, file.id)
-                .then(loaded => {
-                    // Only update if content actually changed and we're still viewing the same file
-                    if (loaded.content !== this.currentFile.content && this.view === 'editor' && this.currentFile.id === file.id) {
-                        this.currentFile = loaded
-                        const contentArea = this.container.querySelector('#file-content')
-                        const preview = this.container.querySelector('#editor-preview')
-                        if (contentArea && !this.editorDirty) {
-                            contentArea.value = loaded.content || ''
-                            if (preview) this._renderPreview(preview, contentArea.value)
-                        }
-                    }
-                })
-                .catch(() => {})
+            // Still revalidate against the cloud so edits from another device land.
+            filesAPI.loadContent(this.currentFolder.id, file.id, applyFresh).catch(() => {})
         } else {
             this.container.innerHTML = this._shell(this._loading('Loading file...'))
             this._bindShell()
 
-            filesAPI.loadContent(this.currentFolder.id, file.id)
+            filesAPI.loadContent(this.currentFolder.id, file.id, applyFresh)
                 .then(loaded => {
                     if (this.view === 'editor' && this.currentFile.id === file.id) {
                         this.currentFile = loaded
@@ -1736,6 +1923,15 @@ export class ThoughtCollector {
                     }
                 })
                 .catch(err => {
+                    if (err && err.code === 'app/file-missing') {
+                        filesAPI.forgetLocal(this.currentFolder.id, file.id)
+                        this.currentFolder = foldersAPI.list().find(f => f.id === this.currentFolder.id)
+                        this.currentFile = null
+                        this.editorDirty = false
+                        this._navigate('files', { folder: this.currentFolder })
+                        this._toast('That note was deleted on another device and has been removed here.')
+                        return
+                    }
                     // Never leave the editor stuck on "Loading file...". Fall back
                     // to whatever content we have (empty for a new/unwritten file)
                     // so the user can read and edit instead of staring at a spinner.
@@ -1759,10 +1955,10 @@ export class ThoughtCollector {
         const modeButtons = `
             <div class="mode-toggle" id="mode-toggle">
                 ${!this._isMobile() ? `
-                <button class="mode-btn ${mode === 'split' ? 'active' : ''}" data-mode="split" title="Split view">Split</button>
+                <button class="mode-btn ${mode === 'split' ? 'active' : ''}" data-mode="split" title="Split view" aria-pressed="${mode === 'split'}">Split</button>
                 ` : ''}
-                <button class="mode-btn ${mode === 'edit' ? 'active' : ''}" data-mode="edit" title="Edit only">Edit</button>
-                <button class="mode-btn ${mode === 'preview' ? 'active' : ''}" data-mode="preview" title="Preview only">Preview</button>
+                <button class="mode-btn ${mode === 'edit' ? 'active' : ''}" data-mode="edit" title="Edit only" aria-pressed="${mode === 'edit'}">Edit</button>
+                <button class="mode-btn ${mode === 'preview' ? 'active' : ''}" data-mode="preview" title="Preview only" aria-pressed="${mode === 'preview'}">Preview</button>
             </div>
         `
 
@@ -1780,6 +1976,8 @@ export class ThoughtCollector {
                         class="cyber-input title-input"
                         value="${this._esc(file.title)}"
                         placeholder="File title..."
+                        aria-label="File title"
+                        maxlength="200"
                     />
                     <div class="editor-actions">
                         <button class="editor-back-btn" id="editor-back-btn" title="Back (ESC)">&larr; Back</button>
@@ -1818,7 +2016,7 @@ export class ThoughtCollector {
                             <span class="btn-glow"></span>
                         </button>
                         <div class="editor-actions-menu-wrap">
-                            <button class="editor-actions-menu-btn" id="editor-menu-btn" title="More" aria-label="More editor actions">&#8942;</button>
+                            <button class="editor-actions-menu-btn" id="editor-menu-btn" title="More" aria-label="More editor actions" aria-expanded="false" aria-controls="editor-actions-menu">&#8942;</button>
                             <div class="editor-actions-menu hidden" id="editor-actions-menu">
                                 <button class="menu-item" data-action="pdf">Export PDF</button>
                                 <button class="menu-item" data-action="focus">Focus mode</button>
@@ -1830,7 +2028,7 @@ export class ThoughtCollector {
                         </div>
                     </div>
                 </div>
-                <div class="format-toolbar" id="format-toolbar">
+                <div class="format-toolbar" id="format-toolbar" role="toolbar" aria-label="Markdown formatting">
                     <button class="fmt-btn" data-fmt="bold" title="Bold (Ctrl+B)"><b>B</b></button>
                     <button class="fmt-btn" data-fmt="italic" title="Italic (Ctrl+I)"><i>I</i></button>
                     <button class="fmt-btn" data-fmt="strikethrough" title="Strikethrough"><s>S</s></button>
@@ -1858,7 +2056,7 @@ export class ThoughtCollector {
                     <button class="fmt-btn" data-fmt="callout" title="Callout block">Callout</button>
                     <button class="fmt-btn" data-fmt="highlight" title="Highlight">==</button>
                     <button class="fmt-btn" data-fmt="footnote" title="Footnote">[^]</button>
-                    <button class="fmt-btn fmt-more-btn" id="fmt-more" title="More formatting" aria-label="More formatting">+</button>
+                    <button class="fmt-btn fmt-more-btn" id="fmt-more" title="More formatting" aria-label="More formatting" aria-expanded="false">+</button>
                 </div>
                 <div class="editor-body">
                     <div class="editor-pane">
@@ -1866,6 +2064,7 @@ export class ThoughtCollector {
                             id="file-content"
                             class="cyber-textarea editor-textarea"
                             placeholder="Start writing..."
+                            aria-label="Note content"
                         ></textarea>
                     </div>
                     <div class="editor-divider"></div>
@@ -1888,15 +2087,15 @@ export class ThoughtCollector {
             </div>
             <div class="find-replace-bar hidden" id="find-replace-bar">
                 <div class="find-replace-row">
-                    <input type="text" class="find-input" id="find-input" placeholder="Find..." />
+                    <input type="text" class="find-input" id="find-input" placeholder="Find..." aria-label="Find text" />
                     <span class="find-count" id="find-count">0/0</span>
                     <button class="find-nav-btn" id="find-prev" title="Previous">&uarr;</button>
                     <button class="find-nav-btn" id="find-next" title="Next">&darr;</button>
                     <button class="find-nav-btn" id="find-toggle-replace" title="Toggle replace">&#8597;</button>
-                    <button class="find-close-btn" id="find-close">&times;</button>
+                    <button class="find-close-btn" id="find-close" aria-label="Close find and replace">&times;</button>
                 </div>
                 <div class="find-replace-row replace-row hidden" id="replace-row">
-                    <input type="text" class="find-input" id="replace-input" placeholder="Replace..." />
+                    <input type="text" class="find-input" id="replace-input" placeholder="Replace..." aria-label="Replacement text" />
                     <button class="find-nav-btn" id="replace-one" title="Replace">Replace</button>
                     <button class="find-nav-btn" id="replace-all" title="Replace all">All</button>
                 </div>
@@ -1989,10 +2188,12 @@ export class ThoughtCollector {
             editorMenuBtn.addEventListener('click', (e) => {
                 e.stopPropagation()
                 editorMenu.classList.toggle('hidden')
+                editorMenuBtn.setAttribute('aria-expanded', String(!editorMenu.classList.contains('hidden')))
             })
-            document.addEventListener('click', (e) => {
+            this._onDocument('click', (e) => {
                 if (!editorMenu.contains(e.target) && e.target !== editorMenuBtn) {
                     editorMenu.classList.add('hidden')
+                    editorMenuBtn.setAttribute('aria-expanded', 'false')
                 }
             })
             // Menu items delegate to the real (mobile-hidden) action buttons
@@ -2000,6 +2201,7 @@ export class ThoughtCollector {
             editorMenu.querySelectorAll('.menu-item').forEach(item => {
                 item.addEventListener('click', () => {
                     editorMenu.classList.add('hidden')
+                    editorMenuBtn.setAttribute('aria-expanded', 'false')
                     const target = delegate[item.dataset.action]
                     if (target) target.click()
                 })
@@ -2014,6 +2216,7 @@ export class ThoughtCollector {
                 e.preventDefault()
                 const expanded = fmtToolbar.classList.toggle('fmt-expanded')
                 fmtMore.textContent = expanded ? '−' : '+'
+                fmtMore.setAttribute('aria-expanded', String(expanded))
             })
         }
 
@@ -2022,6 +2225,10 @@ export class ThoughtCollector {
         if (this._isMobile() && window.visualViewport && editorZone) {
             const vv = window.visualViewport
             const adjust = () => {
+                const keyboardOpen = window.innerHeight - vv.height > 120
+                editorZone.classList.toggle('keyboard-open', keyboardOpen)
+                // The keyboard state can hide surrounding chrome; measure only
+                // after that layout change so the canvas receives every free px.
                 const top = editorZone.getBoundingClientRect().top
                 editorZone.style.height = Math.max(200, vv.height - top) + 'px'
             }
@@ -2030,6 +2237,7 @@ export class ThoughtCollector {
             this._vvCleanup = () => {
                 vv.removeEventListener('resize', adjust)
                 vv.removeEventListener('scroll', adjust)
+                editorZone.classList.remove('keyboard-open')
             }
             adjust()
         }
@@ -2158,8 +2366,16 @@ export class ThoughtCollector {
     _bindFormatToolbar(textarea, markDirty, preview) {
         // Exclude the "more" toggle — it has no data-fmt and owns its own handler.
         this.container.querySelectorAll('.fmt-btn[data-fmt]').forEach(btn => {
-            btn.addEventListener('mousedown', (e) => {
-                e.preventDefault()  // prevent textarea blur
+            // Compact toolbar glyphs such as "B" and "[[]]" need a useful
+            // spoken name; the tooltip already carries the full action name.
+            if (!btn.hasAttribute('aria-label')) {
+                btn.setAttribute('aria-label', btn.title.replace(/\s*\([^)]*\)\s*$/, ''))
+            }
+            btn.addEventListener('pointerdown', (e) => {
+                // Preserve the textarea selection on touch as well as mouse.
+                // iOS otherwise collapses the selection when the toolbar gains
+                // focus, so formatting lands at the wrong caret position.
+                e.preventDefault()
             })
             btn.addEventListener('click', () => {
                 const fmt = btn.dataset.fmt
@@ -2177,19 +2393,23 @@ export class ThoughtCollector {
         const selected = val.slice(start, end)
         let replacement = ''
         let cursorOffset = 0
+        let placeholderRange = null
 
         switch (fmt) {
             case 'bold':
                 replacement = `**${selected || 'bold text'}**`
-                cursorOffset = selected ? replacement.length : 2
+                cursorOffset = replacement.length
+                if (!selected) placeholderRange = [2, 11]
                 break
             case 'italic':
                 replacement = `*${selected || 'italic text'}*`
-                cursorOffset = selected ? replacement.length : 1
+                cursorOffset = replacement.length
+                if (!selected) placeholderRange = [1, 12]
                 break
             case 'strikethrough':
                 replacement = `~~${selected || 'strikethrough'}~~`
-                cursorOffset = selected ? replacement.length : 2
+                cursorOffset = replacement.length
+                if (!selected) placeholderRange = [2, 15]
                 break
             case 'h1':
                 replacement = this._prependLine('# ', start, val, selected)
@@ -2214,11 +2434,13 @@ export class ThoughtCollector {
                 return
             case 'code':
                 replacement = `\`${selected || 'code'}\``
-                cursorOffset = selected ? replacement.length : 1
+                cursorOffset = replacement.length
+                if (!selected) placeholderRange = [1, 5]
                 break
             case 'codeblock':
                 replacement = `\n\`\`\`\n${selected || 'code here'}\n\`\`\`\n`
-                cursorOffset = selected ? replacement.length : 5
+                cursorOffset = replacement.length
+                if (!selected) placeholderRange = [5, 14]
                 break
             case 'quote':
                 replacement = this._prependLine('> ', start, val, selected)
@@ -2241,11 +2463,17 @@ export class ThoughtCollector {
                 return
             case 'link':
                 replacement = `[${selected || 'link text'}](url)`
-                cursorOffset = selected ? replacement.length - 4 : 1
+                cursorOffset = replacement.length
+                placeholderRange = selected
+                    ? [replacement.length - 4, replacement.length - 1]
+                    : [1, 10]
                 break
             case 'image':
                 replacement = `![${selected || 'alt text'}](url)`
-                cursorOffset = selected ? replacement.length - 4 : 2
+                cursorOffset = replacement.length
+                placeholderRange = selected
+                    ? [replacement.length - 4, replacement.length - 1]
+                    : [2, 10]
                 break
             case 'hr':
                 replacement = '\n---\n'
@@ -2257,11 +2485,13 @@ export class ThoughtCollector {
                 break
             case 'wikilink':
                 replacement = `[[${selected || 'note name'}]]`
-                cursorOffset = selected ? replacement.length : 2
+                cursorOffset = replacement.length
+                if (!selected) placeholderRange = [2, 11]
                 break
             case 'tag':
                 replacement = `#${selected || 'tag'}`
                 cursorOffset = replacement.length
+                if (!selected) placeholderRange = [1, 4]
                 break
             case 'callout':
                 replacement = this._prependLine('> [!note] ', start, val, selected)
@@ -2272,18 +2502,24 @@ export class ThoughtCollector {
                 return
             case 'highlight':
                 replacement = `==${selected || 'highlighted text'}==`
-                cursorOffset = selected ? replacement.length : 2
+                cursorOffset = replacement.length
+                if (!selected) placeholderRange = [2, 18]
                 break
             case 'footnote':
                 replacement = `[^${selected || '1'}]`
                 cursorOffset = replacement.length
+                if (!selected) placeholderRange = [2, 3]
                 break
             default:
                 return
         }
 
         textarea.value = val.slice(0, start) + replacement + val.slice(end)
-        textarea.setSelectionRange(start + cursorOffset, start + cursorOffset)
+        if (placeholderRange) {
+            textarea.setSelectionRange(start + placeholderRange[0], start + placeholderRange[1])
+        } else {
+            textarea.setSelectionRange(start + cursorOffset, start + cursorOffset)
+        }
         textarea.dispatchEvent(new Event('input'))
         textarea.focus()
     }
@@ -2938,7 +3174,11 @@ export class ThoughtCollector {
         let s = this._normaliseIndentForRender(str || '')
         s = this._normaliseMath(s)
         s = this._preprocessMarkdown(s)
-        return (typeof marked !== 'undefined') ? marked.parse(s) : s
+        if (typeof marked === 'undefined') return this._esc(s)
+        return DOMPurify.sanitize(marked.parse(s), {
+            USE_PROFILES: { html: true },
+            FORBID_TAGS: ['style', 'form', 'iframe', 'object', 'embed', 'link', 'meta', 'base'],
+        })
     }
 
     // ── Obsidian-style editor keydown behaviors ────────────────
@@ -3286,7 +3526,7 @@ export class ThoughtCollector {
             if (e.shiftKey) showToolbar()
             else toolbar.style.display = 'none'
         })
-        document.addEventListener('mousedown', (e) => {
+        this._onDocument('mousedown', (e) => {
             if (!toolbar.contains(e.target) && e.target !== textarea) {
                 toolbar.style.display = 'none'
             }
@@ -3592,12 +3832,21 @@ export class ThoughtCollector {
     }
 
     // ── Wikilink helpers ────────────────────────────────────────
+    // Backlinks, the graph view and tag search all read `content` off these
+    // copies. The prefetch fills the content cache without writing bodies back
+    // into the meta records, so read through contentFor — otherwise a browser
+    // holding the entire vault still shows an empty graph and no backlinks
+    // until each note has been opened by hand.
     _getAllFiles() {
         const allFolders = foldersAPI.list()
         const files = []
         for (const f of allFolders) {
             for (const file of f.files) {
-                files.push({ ...file, folderId: f.id, folderName: f.name, folderPath: f.path })
+                files.push({
+                    ...file,
+                    content: contentFor(file),
+                    folderId: f.id, folderName: f.name, folderPath: f.path,
+                })
             }
         }
         return files
@@ -3663,7 +3912,7 @@ export class ThoughtCollector {
             { name: 'Toggle Backlinks Panel', action: () => { this._backlinksOpen = !this._backlinksOpen; this._updateBacklinksPanel() } },
             { name: 'Keyboard Shortcuts', key: `${mod}+/`, action: () => this._showShortcutsPanel() },
             ...THEMES.map(t => ({ name: `Theme: ${t.label}`, action: () => { this._applyTheme(t.id); this._render() } })),
-            { name: 'Log Out', action: async () => { await auth.logout(); this.onLogout() } },
+            { name: 'Log Out', action: async () => { this.destroy(); await auth.logout(); this.onLogout() } },
         ]
 
         const overlay = document.createElement('div')
@@ -4142,13 +4391,22 @@ export class ThoughtCollector {
 
     // ── Render preview with source line tracking ──────────────
     _renderPreview(previewEl, markdown) {
+        const source = markdown || ''
+
+        // marked is fetched on demand rather than blocking the page load. Until
+        // it lands, show the raw text (never a blank pane) and re-render once
+        // it's there.
+        if (typeof marked === 'undefined') {
+            previewEl.textContent = source
+            ensureMarked().then(ok => {
+                if (ok && previewEl.isConnected) this._renderPreview(previewEl, markdown)
+            })
+            return
+        }
+
         // _mdToHtml runs indent normalization FIRST (on pure markdown, before any
         // HTML injection), then math + Obsidian preprocessing, then marked.
-        if (typeof marked !== 'undefined') {
-            previewEl.innerHTML = this._mdToHtml(markdown || '')
-        } else {
-            previewEl.textContent = markdown || ''
-        }
+        previewEl.innerHTML = this._mdToHtml(source)
 
         // Make checkboxes interactive (GFM task lists)
         previewEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -4161,27 +4419,46 @@ export class ThoughtCollector {
             el.classList.add('inline-code-tt')
         })
 
-        // Syntax highlighting with highlight.js
-        if (typeof hljs !== 'undefined') {
-            previewEl.querySelectorAll('pre code').forEach(block => {
-                // Check for mermaid blocks
-                if (block.className.includes('language-mermaid') || block.textContent.trim().startsWith('graph ') || block.textContent.trim().startsWith('sequenceDiagram') || block.textContent.trim().startsWith('flowchart')) {
-                    const mermaidDiv = document.createElement('div')
-                    mermaidDiv.className = 'mermaid'
-                    mermaidDiv.textContent = block.textContent
-                    block.closest('pre').replaceWith(mermaidDiv)
-                    return
-                }
-                hljs.highlightElement(block)
+        // Split diagram blocks out of the code blocks before highlighting. This
+        // used to live inside the "is highlight.js loaded" branch, so diagrams
+        // silently didn't render whenever hljs was missing.
+        const toHighlight = []
+        let hasMermaid = false
+        previewEl.querySelectorAll('pre code').forEach(block => {
+            const text = block.textContent.trim()
+            if (block.className.includes('language-mermaid') || text.startsWith('graph ')
+                || text.startsWith('sequenceDiagram') || text.startsWith('flowchart')) {
+                const mermaidDiv = document.createElement('div')
+                mermaidDiv.className = 'mermaid'
+                mermaidDiv.textContent = block.textContent
+                block.closest('pre').replaceWith(mermaidDiv)
+                hasMermaid = true
+                return
+            }
+            toHighlight.push(block)
+        })
+
+        // Syntax highlighting — highlight.js is only fetched for a note that
+        // actually has code in it.
+        if (toHighlight.length) {
+            const highlight = () => toHighlight.forEach(b => {
+                if (b.isConnected) window.hljs.highlightElement(b)
             })
+            if (window.hljs) highlight()
+            else ensureHljs().then(ok => { if (ok && previewEl.isConnected) highlight() })
         }
 
-        // Render mermaid diagrams
-        if (typeof mermaid !== 'undefined') {
-            try {
-                mermaid.initialize({ startOnLoad: false, theme: 'dark' })
-                mermaid.run({ nodes: previewEl.querySelectorAll('.mermaid') })
-            } catch { /* mermaid parse errors are non-fatal */ }
+        // Mermaid is the heaviest library of the lot; a note without a diagram
+        // never downloads it.
+        if (hasMermaid) {
+            const runMermaid = () => {
+                try {
+                    window.mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' })
+                    window.mermaid.run({ nodes: previewEl.querySelectorAll('.mermaid') })
+                } catch { /* mermaid parse errors are non-fatal */ }
+            }
+            if (window.mermaid) runMermaid()
+            else ensureMermaid().then(ok => { if (ok && previewEl.isConnected) runMermaid() })
         }
 
         // Wikilink click handling
@@ -4239,9 +4516,12 @@ export class ThoughtCollector {
             }
         })
 
-        // Render math with KaTeX
-        if (typeof renderMathInElement !== 'undefined') {
-            renderMathInElement(previewEl, {
+        // Render math with KaTeX — fetched only for notes that contain math.
+        // Gate on the NORMALISED text, not the raw source: _normaliseMath turns
+        // pasted `[ \frac{a}{b} ]` and `(x \le y)` into real $-delimiters, and
+        // testing the source would miss those and never load KaTeX for them.
+        if (needsMath(this._normaliseMath(source))) {
+            const runMath = () => window.renderMathInElement(previewEl, {
                 delimiters: [
                     { left: '$$', right: '$$', display: true },
                     { left: '$',  right: '$',  display: false },
@@ -4251,6 +4531,8 @@ export class ThoughtCollector {
                 throwOnError: false,
                 ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
             })
+            if (window.renderMathInElement) runMath()
+            else ensureKatex().then(ok => { if (ok && previewEl.isConnected) runMath() })
         }
     }
 
@@ -4308,7 +4590,9 @@ export class ThoughtCollector {
         if (!editorZone) return
         editorZone.dataset.mode = mode
         editorZone.querySelectorAll('.mode-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.mode === mode)
+            const active = btn.dataset.mode === mode
+            btn.classList.toggle('active', active)
+            btn.setAttribute('aria-pressed', String(active))
         })
         if (mode === 'preview') {
             const contentArea = editorZone.querySelector('#file-content')
@@ -4327,6 +4611,8 @@ export class ThoughtCollector {
         const el = document.createElement('div')
         el.id = 'saving-overlay'
         el.className = 'saving-indicator'
+        el.setAttribute('role', 'status')
+        el.setAttribute('aria-live', 'polite')
         el.innerHTML = '<span class="saving-label">Saving...</span>'
         document.body.appendChild(el)
         setTimeout(() => el.classList.add('visible'), 10)
@@ -4347,6 +4633,8 @@ export class ThoughtCollector {
         const toast = document.createElement('div')
         toast.id = 'progress-toast'
         toast.className = 'progress-toast'
+        toast.setAttribute('role', 'status')
+        toast.setAttribute('aria-live', 'polite')
         toast.innerHTML = `
             <div class="progress-header">
                 <span class="progress-action">> ${action.toUpperCase()} <span id="progress-fraction">0/${total}</span></span>
@@ -4394,12 +4682,16 @@ export class ThoughtCollector {
         return new Promise((resolve) => {
             const overlay = document.createElement('div')
             overlay.className = 'modal-overlay'
+            const safeTitle = this._esc(title)
+            const safeMessage = this._esc(message)
+            const safePlaceholder = this._esc(placeholder)
 
             if (type === 'input') {
                 overlay.innerHTML = `
-                    <div class="modal-box">
-                        <div class="modal-title">${title}</div>
-                        <input class="modal-input" type="text" placeholder="${placeholder}" value="${this._esc(defaultValue)}" />
+                    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+                        <div class="modal-title" id="modal-title">${safeTitle}</div>
+                        <label class="sr-only" for="modal-input">${safeTitle || 'Value'}</label>
+                        <input class="modal-input" id="modal-input" type="text" maxlength="200" placeholder="${safePlaceholder}" value="${this._esc(defaultValue)}" />
                         <div class="modal-actions">
                             <button class="modal-btn modal-cancel">CANCEL</button>
                             <button class="modal-btn modal-confirm">OK</button>
@@ -4419,9 +4711,9 @@ export class ThoughtCollector {
                 })
             } else {
                 overlay.innerHTML = `
-                    <div class="modal-box">
-                        <div class="modal-title">${title}</div>
-                        ${message ? `<div class="modal-message">${message}</div>` : ''}
+                    <div class="modal-box" role="alertdialog" aria-modal="true" aria-labelledby="modal-title"${message ? ' aria-describedby="modal-message"' : ''}>
+                        <div class="modal-title" id="modal-title">${safeTitle}</div>
+                        ${message ? `<div class="modal-message" id="modal-message">${safeMessage}</div>` : ''}
                         <div class="modal-actions">
                             <button class="modal-btn modal-cancel">CANCEL</button>
                             <button class="modal-btn modal-confirm danger">OK</button>
@@ -4446,6 +4738,8 @@ export class ThoughtCollector {
     _toast(message) {
         const toast = document.createElement('div')
         toast.className = 'cyber-toast'
+        toast.setAttribute('role', 'status')
+        toast.setAttribute('aria-live', 'polite')
         toast.textContent = message
         document.body.appendChild(toast)
         setTimeout(() => toast.classList.add('visible'), 10)
@@ -4463,7 +4757,12 @@ export class ThoughtCollector {
     }
 
     _relTime(iso) {
-        const diff = Date.now() - new Date(iso).getTime()
+        // A note synced from the cloud has no known mtime until the background
+        // pass fills it in — show nothing rather than a made-up time.
+        if (!iso) return '—'
+        const t = new Date(iso).getTime()
+        if (!Number.isFinite(t)) return '—'
+        const diff = Date.now() - t
         const m = Math.floor(diff / 60000)
         const h = Math.floor(diff / 3600000)
         const d = Math.floor(diff / 86400000)
