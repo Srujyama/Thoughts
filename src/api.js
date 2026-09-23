@@ -33,6 +33,20 @@ function _sessionExpired() {
     if (_onSessionExpired) _onSessionExpired()
 }
 
+// ── Storage-full callback (set by main.js to warn the user) ──
+// localStorage is a hard ~5 MB per origin. Once it is full every write here
+// fails, including the offline queue's rescue copies, and the user has no way
+// of knowing unless we tell them.
+let _onStorageFull = null
+
+export function setStorageFullHandler(handler) {
+    _onStorageFull = handler
+}
+
+function _storageFull(err) {
+    if (_onStorageFull) _onStorageFull(err)
+}
+
 // Point the content cache at the right account as soon as we know who it is,
 // so a warm() at boot can only ever surface this user's notes.
 const _cachedUser = (() => {
@@ -40,10 +54,23 @@ const _cachedUser = (() => {
 })()
 if (_cachedUser && _cachedUser.user_id) contentCache.setUser(_cachedUser.user_id)
 
+// Whose vault this browser holds. Every localStorage key is derived from this
+// rather than from the live session, because an expiring token clears the
+// session synchronously: keys read after that point would flip to "anon", and
+// the rescue copy of a save that failed for the very same reason would land
+// under a key nothing ever reads again. An expiry means "sign in again as the
+// same person", so only an explicit sign-out clears it.
+let _lastKnownUid = (_cachedUser && _cachedUser.user_id) || null
+
+function _currentUid() {
+    return _lastKnownUid || auth.getUser()?.user_id || null
+}
+
 // When the SDK finishes restoring the persisted session: if the app thought it
 // was signed in but Firebase says otherwise, the session is gone — kick to login.
 authReady.then(user => {
     if (user) {
+        _lastKnownUid = user.uid
         contentCache.setUser(user.uid)
         localStorage.setItem(USER_KEY, JSON.stringify({ user_id: user.uid, email: user.email }))
         // Warm the ID token now. Tokens live an hour, so the common "opened my
@@ -93,6 +120,13 @@ function _friendlyAuthError(err) {
 
 function _storeUser(user) {
     const info = { user_id: user.uid, email: user.email }
+    // Signing in as somebody else happens without a reload, so the module-level
+    // sync state has to be dropped by hand — otherwise the new account inherits
+    // the previous one's freshness window (and sees an empty vault reported as
+    // a successful sync) or its in-flight listing (and gets the other account's
+    // folder names written into its own meta).
+    if ((auth.getUser()?.user_id || null) !== user.uid) _resetSyncState()
+    _lastKnownUid = user.uid
     contentCache.setUser(user.uid)
     localStorage.setItem(USER_KEY, JSON.stringify(info))
     return info
@@ -129,8 +163,11 @@ export const auth = {
     },
 
     async logout() {
+        _flushMeta()   // land any coalesced meta write under the outgoing user's key
         try { await signOut(fbAuth) } catch { /* no-op */ }
         localStorage.removeItem(USER_KEY)
+        _lastKnownUid = null
+        _resetSyncState()
         contentCache.clear().catch(() => {})
     },
 }
@@ -273,6 +310,16 @@ async function _listViaRest(user) {
         pageToken = data.nextPageToken || null
     } while (pageToken && ++pages < 50)
 
+    // A truncated listing must never be returned: syncMetaFromCloud treats a
+    // successful listing as authoritative and deletes every local record that
+    // isn't in it, so handing back a partial page would erase the tail of the
+    // vault from this device. Fail instead and let the SDK walk take over.
+    if (pageToken) {
+        const err = new Error('Vault listing was truncated')
+        err.code = 'app/list-truncated'
+        throw err
+    }
+
     return files
 }
 
@@ -374,8 +421,18 @@ let _metaWriteScheduled = false
 function _flushMeta() {
     if (!_metaWritePending) return
     _metaWritePending = false
-    try { localStorage.setItem(_metaCacheKey, JSON.stringify(_metaCache)) }
-    catch { /* quota — the in-memory copy is still authoritative this session */ }
+    // Note bodies belong to the content cache, which is backed by IndexedDB and
+    // has room for them. Persisting a second copy of every note the user has
+    // ever opened into this one localStorage key pushed a real vault past the
+    // origin's ~5 MB budget, after which every write here — and every rescue
+    // copy the offline queue tried to make — failed. Bodies stay in the
+    // in-memory meta; only the records are written to disk.
+    const payload = JSON.stringify(
+        _metaCache,
+        (key, value) => (key === 'content' || key === 'contentLoaded' ? undefined : value),
+    )
+    try { localStorage.setItem(_metaCacheKey, payload) }
+    catch (err) { _storageFull(err) }   // the in-memory copy is still authoritative this session
 }
 
 window.addEventListener('pagehide', _flushMeta)
@@ -384,12 +441,23 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) _flus
 // ── Cloud sync dedup — only one sync in-flight, and not more than one per
 // SYNC_TTL, so navigating around the app doesn't re-list the vault repeatedly.
 let _syncPromise = null
+let _syncUid = null
 let _lastSyncAt = 0
 const SYNC_TTL = 15_000
 
+// Everything here describes one account's vault, so it must not outlive that
+// account's session.
+function _resetSyncState() {
+    _syncPromise = null
+    _syncUid = null
+    _lastSyncAt = 0
+    _inFlightReads.clear()   // keyed by path alone: a read started as A must not be handed to B
+    _writeSeq.clear()
+}
+
 function metaKey() {
-    const user = auth.getUser()
-    return user ? `nc_vault_meta_${user.user_id}` : 'nc_vault_meta_anon'
+    const uid = _currentUid()
+    return uid ? `nc_vault_meta_${uid}` : 'nc_vault_meta_anon'
 }
 
 function loadMeta() {
@@ -472,7 +540,7 @@ function ensureFolderPath(folderPath, meta, index) {
 // Merge a raw vault file list into the local folder/file meta cache.
 // Indexed by path so a 70-object vault costs one pass, not one linear scan of
 // every folder per file.
-function syncMetaFromCloud(rawFiles, meta) {
+function syncMetaFromCloud(rawFiles, meta, listedAt = Date.now()) {
     // Migrate old-style folders (no .path field) to new style
     for (const folder of meta.folders) {
         if (!folder.path) {
@@ -489,7 +557,14 @@ function syncMetaFromCloud(rawFiles, meta) {
     const pendingPaths = new Set(offlineQueue.getPending())
     for (const folder of meta.folders) {
         folder.files = folder.files.filter(file => {
-            const keep = cloudPaths.has(file.path) || pendingPaths.has(file.path)
+            // A note created after the listing was taken cannot be in it, and
+            // an optimistic upload that finished in the meantime has already
+            // left the queue — so neither set vouches for it. Pruning it threw
+            // away a note the user had just made, deleted its cached body, and
+            // left the open editor saving to a record that no longer existed.
+            if (isTrashPath(file.path)) return false
+            const createdAfterListing = file.created_at && Date.parse(file.created_at) >= listedAt
+            const keep = cloudPaths.has(file.path) || pendingPaths.has(file.path) || createdAfterListing
             if (!keep) contentCache.delete(file.path)
             return keep
         })
@@ -504,6 +579,7 @@ function syncMetaFromCloud(rawFiles, meta) {
     for (const item of rawFiles) {
         const path = item.path
         if (!path || !path.includes('/')) continue   // skip root-level files
+        if (isTrashPath(path)) continue              // the recycle bin is not a folder
         if (path.endsWith('/.keep')) {
             // Ensure the folder exists in meta even if it has no files yet
             ensureFolderPath(path.replace(/\/\.keep$/, ''), meta, byFolderPath)
@@ -570,6 +646,22 @@ function _noteLocalWrite(path) {
     _writeSeq.set(path, (_writeSeq.get(path) || 0) + 1)
 }
 
+// Cloud Storage has no preconditions on an upload, so two PUTs to one object
+// are resolved by arrival order, not by age: a queued write replayed by a flush
+// could land *after* the save that superseded it and leave the older body in
+// the cloud while the editor shows the newer one. Every writer takes this lock
+// for the path it touches, so writes to one note are strictly ordered.
+const _writeLocks = new Map()
+
+function _withPathLock(path, fn) {
+    const prev = _writeLocks.get(path) || Promise.resolve()
+    const result = prev.then(() => fn(), () => fn())
+    const tail = result.catch(() => {})
+    _writeLocks.set(path, tail)
+    tail.then(() => { if (_writeLocks.get(path) === tail) _writeLocks.delete(path) })
+    return result
+}
+
 function _prefetchOne(path, skip) {
     if (contentCache.getSync(path)) return Promise.resolve(false)
     if (skip && skip.has(path)) return Promise.resolve(false)
@@ -632,19 +724,463 @@ function _schedulePrefetch(folders) {
         .finally(() => { _prefetchBusy = false })
 }
 
+// ── Recycle bin ───────────────────────────────────────────────
+// Deleting a note moves its object under `.trash/` instead of destroying it.
+// The object's NAME carries everything the bin needs — when it was deleted and
+// where it came from — so listing the bin costs one request rather than one per
+// item, and nothing about it lives in localStorage where a cache clear could
+// lose it. Items older than the retention window are swept on the next listing.
+const TRASH_PREFIX = '.trash'
+const TRASH_RETENTION_DAYS = 30
+const TRASH_RETENTION_MS = TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1000
+
+export const trashRetentionDays = TRASH_RETENTION_DAYS
+
+// base64url: an original path's slashes would otherwise create real folders
+// inside `.trash/`, and its name has to survive a round trip exactly.
+function _b64urlEncode(str) {
+    let bin = ''
+    for (const b of new TextEncoder().encode(str)) bin += String.fromCharCode(b)
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function _b64urlDecode(str) {
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/'))
+    return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)))
+}
+
+function _trashPathFor(originalPath, deletedAt) {
+    return `${TRASH_PREFIX}/${deletedAt}__${_b64urlEncode(originalPath)}.md`
+}
+
+export function isTrashPath(path) {
+    return typeof path === 'string' && path.startsWith(TRASH_PREFIX + '/')
+}
+
+function _parseTrashPath(path) {
+    if (!isTrashPath(path) || !path.endsWith('.md')) return null
+    const stem = path.slice(TRASH_PREFIX.length + 1, -3)
+    const sep = stem.indexOf('__')
+    if (sep === -1) return null
+    const deletedAt = Number(stem.slice(0, sep))
+    if (!Number.isFinite(deletedAt) || deletedAt <= 0) return null
+    try {
+        const originalPath = _b64urlDecode(stem.slice(sep + 2))
+        if (!originalPath) return null
+        return { trashPath: path, deletedAt, originalPath }
+    } catch { return null }
+}
+
+// Send one object to the bin: copy it under `.trash/`, prove the copy landed,
+// and only then remove the original — the same discipline as a move, because a
+// delete that cannot be undone is exactly what the bin exists to prevent.
+async function _trashObject(path, knownBody = null) {
+    const queued = _loadPending()[path]
+    let body = queued ? queued.content : knownBody
+    if (body == null) {
+        const result = await vaultAPI.readFileResult(path)
+        if (result.missing) return null          // already gone; nothing to keep
+        body = result.content
+    }
+
+    const trashPath = _trashPathFor(path, Date.now())
+    await vaultAPI.writeFile(trashPath, body)
+    const check = await vaultAPI.readFileResult(trashPath)
+    if (check.missing || check.content !== body) {
+        await vaultAPI.deleteFile(trashPath).catch(() => {})
+        throw new Error(`Could not move "${path}" to the recycle bin — it was left in place`)
+    }
+
+    offlineQueue.dequeue(path)
+    try {
+        await _withPathLock(path, () => vaultAPI.deleteFile(path))
+    } catch (err) {
+        // The original could not be removed, so the bin copy is a duplicate.
+        await vaultAPI.deleteFile(trashPath).catch(() => {})
+        if (queued) offlineQueue.enqueue(path, queued.content)
+        throw err
+    }
+    contentCache.delete(path)
+    return { path, trashPath, body }
+}
+
+export const trashAPI = {
+    retentionDays: TRASH_RETENTION_DAYS,
+
+    // Everything in the bin, newest first. Anything past its retention window
+    // is swept here rather than on a timer — the app has no server to run one.
+    async list({ sweep = true } = {}) {
+        const raw = await vaultAPI.listFiles()
+        const now = Date.now()
+        const items = []
+        const expired = []
+        for (const item of raw) {
+            const parsed = _parseTrashPath(item.path)
+            if (!parsed) continue
+            if (now - parsed.deletedAt >= TRASH_RETENTION_MS) { expired.push(parsed.trashPath); continue }
+            const name = parsed.originalPath.split('/').pop()
+            items.push({
+                ...parsed,
+                title: name.replace(/\.md$/, '').replace(/-/g, ' '),
+                folderPath: parsed.originalPath.split('/').slice(0, -1).join('/'),
+                size: item.size,
+                expiresAt: parsed.deletedAt + TRASH_RETENTION_MS,
+            })
+        }
+        if (sweep && expired.length) {
+            await Promise.all(expired.map(p => vaultAPI.deleteFile(p).catch(() => {})))
+        }
+        items.sort((a, b) => b.deletedAt - a.deletedAt)
+        return items
+    },
+
+    // Put a note back where it came from. If something has since taken that
+    // name, the restored copy gets a free one rather than overwriting it.
+    async restore(trashPath) {
+        const parsed = _parseTrashPath(trashPath)
+        if (!parsed) throw new Error('Not a recycle bin item')
+        const result = await vaultAPI.readFileResult(trashPath)
+        if (result.missing) throw new Error('That item is no longer in the recycle bin')
+
+        const dir = parsed.originalPath.split('/').slice(0, -1).join('/')
+        const name = parsed.originalPath.split('/').pop()
+        const stem = name.replace(/\.md$/, '')
+        const target = await _freeCloudPath(dir, stem, parsed.originalPath, null)
+
+        await vaultAPI.writeFile(target, result.content)
+        const check = await vaultAPI.readFileResult(target)
+        if (check.missing || check.content !== result.content) {
+            await vaultAPI.deleteFile(target).catch(() => {})
+            throw new Error('Could not restore that note — it is still in the recycle bin')
+        }
+        // The folder may have been deleted along with it; its marker has to
+        // come back or the folder won't exist on any other device.
+        if (dir) await vaultAPI.writeFile(`${dir}/.keep`, '').catch(() => {})
+
+        const meta = loadMeta()
+        const folder = ensureFolderPath(dir, meta)
+        if (!folder.files.some(f => f.path === target)) {
+            folder.files.unshift({
+                id: uid(),
+                title: target.split('/').pop().replace(/\.md$/, '').replace(/-/g, ' '),
+                path: target,
+                content: result.content,
+                contentLoaded: true,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            })
+        }
+        saveMeta(meta)
+        contentCache.set(target, result.content)
+        _noteLocalWrite(target)
+
+        await vaultAPI.deleteFile(trashPath).catch(() => {})
+        return { path: target, renamed: target !== parsed.originalPath }
+    },
+
+    // Permanently remove one item. Past this point only the bucket's own
+    // soft-delete window can bring it back.
+    async purge(trashPath) {
+        if (!_parseTrashPath(trashPath)) throw new Error('Not a recycle bin item')
+        await vaultAPI.deleteFile(trashPath)
+    },
+
+    async empty() {
+        const items = await trashAPI.list({ sweep: false })
+        await Promise.all(items.map(i => vaultAPI.deleteFile(i.trashPath).catch(() => {})))
+        return items.length
+    },
+}
+
+// ── Folder relocation ─────────────────────────────────────────
+// Cloud Storage has no folders: a "folder" is a path prefix plus a .keep
+// marker, so moving or renaming one means rewriting every object underneath it.
+// Everything is copied and verified BEFORE anything is deleted, so a failure
+// part-way through leaves the original tree untouched rather than half-moved.
+
+function _uniqueFolderPath(meta, wanted, selfId) {
+    const taken = new Set(meta.folders.filter(f => f.id !== selfId).map(f => f.path))
+    if (!taken.has(wanted)) return wanted
+    const parent = wanted.includes('/') ? wanted.slice(0, wanted.lastIndexOf('/') + 1) : ''
+    const leaf = wanted.slice(parent.length)
+    for (let n = 2; ; n++) {
+        const candidate = `${parent}${leaf}-${n}`
+        if (!taken.has(candidate)) return candidate
+    }
+}
+
+// Newest body for a note, preferring an unflushed local write over the cloud.
+async function _authoritativeBody(file) {
+    const queued = _loadPending()[file.path]
+    if (queued) return queued.content
+    const result = await vaultAPI.readFileResult(file.path)
+    if (result.missing) {
+        const local = (file.contentLoaded && file.content) || contentCache.getSync(file.path)?.content
+        if (local) return local
+        return null            // genuinely gone — skip it rather than write a blank
+    }
+    if (file.contentLoaded && file.content && file.content !== result.content) return file.content
+    return result.content
+}
+
+async function _relocateFolder(meta, folder, newPath) {
+    const oldPath = folder.path
+    if (oldPath === newPath) return
+
+    // Every folder in the moved subtree, with its new path. Collected by path
+    // prefix rather than by parentId: a folder restored from an older meta
+    // format can sit at a nested path with parentId still null, and walking
+    // links alone would leave it (and its notes) behind at the old location.
+    const subtree = meta.folders
+        .filter(f => f.path === oldPath || f.path.startsWith(oldPath + '/'))
+        .map(f => ({ folder: f, oldPath: f.path, newPath: newPath + f.path.slice(oldPath.length) }))
+        .sort((a, b) => a.oldPath.length - b.oldPath.length)   // parents before children
+
+    // Phase 1 — copy every note and .keep to its new location, and verify.
+    // Destination names are checked against Storage, not just against this
+    // browser's meta: a note another device put at the wanted path would
+    // otherwise be overwritten with no trace, which is the same class of silent
+    // loss the single-note move already guards against.
+    const moved = []
+    const keepsCreated = []
+    try {
+        for (const node of subtree) {
+            const keep = `${node.newPath}/.keep`
+            if ((await vaultAPI.readFileResult(keep)).missing) {
+                await vaultAPI.writeFile(keep, '')
+                keepsCreated.push(keep)
+            }
+            for (const file of node.folder.files) {
+                const from = file.path
+                const name = from.split('/').pop()
+                const to = await _freeCloudPath(
+                    node.newPath, name.replace(/\.md$/, ''), `${node.newPath}/${name}`, from,
+                )
+                if (from === to) continue
+                const body = await _authoritativeBody(file)
+                if (body === null) continue          // nothing in the cloud to move
+                const check = await _withPathLock(to, async () => {
+                    await vaultAPI.writeFile(to, body)
+                    return vaultAPI.readFileResult(to)
+                })
+                if (check.missing || check.content !== body) {
+                    throw new Error(`Could not copy "${file.title || from}" — the move was cancelled and nothing was deleted`)
+                }
+                moved.push({ file, from, to, body })
+            }
+        }
+    } catch (err) {
+        // Roll the copies back; the originals were never touched. Only remove
+        // the .keep markers this call actually created — one that was already
+        // there belongs to a folder we did not make.
+        await Promise.all(moved.map(m => vaultAPI.deleteFile(m.to).catch(() => {})))
+        await Promise.all(keepsCreated.map(k => vaultAPI.deleteFile(k).catch(() => {})))
+        throw err
+    }
+
+    // Phase 2 — the copies are verified, so the originals can go.
+    const stranded = []
+    for (const m of moved) {
+        const queued = _loadPending()[m.from]
+        if (queued) { offlineQueue.enqueue(m.to, queued.content); offlineQueue.dequeue(m.from) }
+        try {
+            await _withPathLock(m.from, () => vaultAPI.deleteFile(m.from))
+        } catch {
+            // The copy is good, so the note is safe — but the original is still
+            // there and the next sync would show it as a duplicate. Say so
+            // rather than leaving the user to discover it.
+            stranded.push(m.from)
+        }
+        contentCache.set(m.to, m.body)
+        contentCache.delete(m.from)
+        _noteLocalWrite(m.to)
+        m.file.path = m.to
+        m.file.content = m.body
+        m.file.contentLoaded = true
+    }
+    await Promise.all(subtree.map(n => vaultAPI.deleteFile(`${n.oldPath}/.keep`).catch(() => {})))
+
+    // Phase 3 — point the meta records at the new locations. Descendants too:
+    // leaving them behind is what produced ghost folders on the next sync.
+    for (const node of subtree) node.folder.path = node.newPath
+
+    if (stranded.length) {
+        throw new Error(
+            `Moved, but ${stranded.length} old ${stranded.length === 1 ? 'copy' : 'copies'} ` +
+            'could not be removed and may reappear on the next sync',
+        )
+    }
+}
+
+// A name nothing else occupies. The `taken` sets callers build come from this
+// browser's meta, and writeFile overwrites unconditionally, so a note another
+// device created at the wanted name would be replaced with no trace and no
+// error — ask Storage before pointing anything at a path.
+async function _freeCloudPath(dir, stem, wanted, selfPath) {
+    let candidate = wanted
+    for (let n = 2; n < 50; n++) {
+        if (candidate === selfPath) return candidate
+        const probe = await vaultAPI.readFileResult(candidate)
+        if (probe.missing) return candidate
+        candidate = `${dir}/${stem}-${n}.md`
+    }
+    throw new Error(`Could not find a free name for "${stem}" in ${dir}`)
+}
+
+// Move one note's object to `newPath`: write the body, prove it landed, carry
+// any queued write across, and only then remove the original. Shared by move
+// and rename because both must never end up as a delete — on 2026-09-15 a move
+// that trusted an unverified copy turned a 15,779-byte note into a 0-byte file.
+async function _relocateObject(file, newPath, content) {
+    const oldPath = file.path
+    const queued = _loadPending()[oldPath]
+
+    const verify = await _withPathLock(newPath, async () => {
+        await vaultAPI.writeFile(newPath, content)
+        return vaultAPI.readFileResult(newPath)
+    })
+    if (verify.missing || verify.content !== content) {
+        await vaultAPI.deleteFile(newPath).catch(() => {})
+        throw new Error(`Could not verify the copy of "${file.title || oldPath}" — nothing was deleted`)
+    }
+
+    // Re-point any queued write before the old path stops existing, or the
+    // flush would recreate the note at its old location as a duplicate.
+    if (queued) {
+        offlineQueue.enqueue(newPath, queued.content)
+        offlineQueue.dequeue(oldPath)
+    }
+
+    try {
+        await _withPathLock(oldPath, () => vaultAPI.deleteFile(oldPath))
+    } catch (err) {
+        // The delete failed — but "failed" can also mean it was applied and the
+        // response was lost. Rolling back blind would then delete the copy we
+        // just verified, leaving no copy at all. Ask Storage which world we are
+        // in, and only undo the copy if the original is provably still there.
+        let originalSurvives = false
+        try {
+            originalSurvives = !(await vaultAPI.readFileResult(oldPath)).missing
+        } catch {
+            originalSurvives = false     // can't prove it — keep both copies
+        }
+        if (originalSurvives) {
+            await vaultAPI.deleteFile(newPath).catch(() => {})
+            if (queued) { offlineQueue.enqueue(oldPath, queued.content); offlineQueue.dequeue(newPath) }
+            throw err
+        }
+        // The original is gone and the copy is verified, so the relocation
+        // actually succeeded. Commit it rather than destroying the last copy.
+    }
+
+    contentCache.set(newPath, content)
+    contentCache.delete(oldPath)
+    _noteLocalWrite(newPath)
+
+    file.path = newPath
+    file.content = content
+    file.contentLoaded = true
+}
+
+// Everything that has to go when a folder is deleted: the subtree's own
+// records, plus every object that currently lives under its prefixes in
+// Storage. Deleting only what this browser has synced leaves behind notes
+// another device created, and the next listing rebuilds the "deleted" folder
+// out of them.
+async function _collectFolderDeletion(meta, folderId) {
+    const root = meta.folders.find(f => f.id === folderId)
+    if (!root) return null
+
+    // By path prefix as well as by parentId, for the same reason
+    // _relocateFolder walks prefixes: a folder restored from an older meta
+    // format can sit at a nested path with parentId still null, and following
+    // links alone would skip it and every note inside it.
+    const folders = new Map()
+    const collect = (folder) => {
+        if (!folder || folders.has(folder.id)) return
+        folders.set(folder.id, folder)
+        meta.folders
+            .filter(f => f.parentId === folder.id || f.path.startsWith(folder.path + '/'))
+            .forEach(collect)
+    }
+    collect(root)
+
+    const paths = new Set()
+    for (const folder of folders.values()) {
+        paths.add(`${folder.path}/.keep`)
+        for (const file of folder.files) if (file.path) paths.add(file.path)
+    }
+
+    // Throws if the vault can't be listed, which aborts the delete — better
+    // than telling the user a folder is gone while its notes survive.
+    const cloud = await vaultAPI.listFiles()
+    const prefixes = [...folders.values()].map(f => f.path + '/')
+    for (const item of cloud) {
+        if (!item.path || isTrashPath(item.path)) continue
+        if (prefixes.some(prefix => item.path.startsWith(prefix))) paths.add(item.path)
+    }
+
+    return { root, folders: [...folders.values()], paths: [...paths] }
+}
+
+// Remove a set of objects, keeping the offline queue in step: a queued write
+// left behind would be replayed by the next flush and put the note back.
+// Entries are dropped before the deletes so a flush racing this can't re-add
+// the object, and restored for anything that could not actually be deleted.
+async function _deleteObjects(paths, onDeleted) {
+    const queued = _loadPending()
+    const snapshot = paths.filter(p => queued[p]).map(p => [p, queued[p].content])
+
+    const failed = []
+    await Promise.all(paths.map(async path => {
+        try {
+            // A `.keep` is a folder marker, not content — there is nothing to
+            // recover, so it goes straight out. Notes go to the recycle bin.
+            if (path.endsWith('/.keep')) {
+                offlineQueue.dequeue(path)
+                await vaultAPI.deleteFile(path)
+                contentCache.delete(path)
+            } else {
+                await _trashObject(path)
+            }
+        } catch {
+            failed.push(path)
+        }
+        if (onDeleted) onDeleted()
+    }))
+
+    const stillThere = new Set(failed)
+    for (const [path, content] of snapshot) {
+        if (stillThere.has(path)) offlineQueue.enqueue(path, content)
+    }
+    return failed
+}
+
 export const foldersAPI = {
     async listFromCloud() {
+        // Both short-circuits below answer for whoever asked last, so they are
+        // held to the account that asked: handing account B the listing (or the
+        // freshness) of account A is how B ended up looking at A's folder names.
+        const me = _currentUid()
         // Reuse an in-flight sync rather than firing a second identical listing.
-        if (_syncPromise) return _syncPromise
+        if (_syncPromise && _syncUid === me) return _syncPromise
         // Every visit to the folders view calls this. Bouncing between views
         // shouldn't re-list the vault each time — the 60s poll and the
         // foreground/online handlers cover genuine freshness.
-        if (Date.now() - _lastSyncAt < SYNC_TTL) return loadMeta().folders
+        if (Date.now() - _lastSyncAt < SYNC_TTL && _syncUid === me) return loadMeta().folders
+        _syncUid = me
         _syncPromise = (async () => {
             try {
+                // Stamped before the request: anything created while it is in
+                // flight must not be judged by a listing that predates it.
+                const listedAt = Date.now()
                 const rawFiles = await vaultAPI.listFiles()
+                // The listing was made under `me`; if the page has switched
+                // accounts since, writing it into the meta now would file one
+                // account's notes under the other's key.
+                if (_currentUid() !== me) return loadMeta().folders
                 let meta = loadMeta()
-                meta = syncMetaFromCloud(rawFiles, meta)
+                meta = syncMetaFromCloud(rawFiles, meta, listedAt)
                 saveMeta(meta)
                 _lastSyncAt = Date.now()
                 _schedulePrefetch(meta.folders)
@@ -747,12 +1283,18 @@ export const foldersAPI = {
         return folder
     },
 
-    rename(folderId, newName) {
+    async rename(folderId, newName) {
         const meta = loadMeta()
         const folder = meta.folders.find(f => f.id === folderId)
         if (!folder) throw new Error('Folder not found')
-        folder.name = cleanLabel(newName, 'Folder name', 100)
-        // Note: renaming path would require moving all cloud files — keep path stable
+        const name = cleanLabel(newName, 'Folder name', 100)
+        const parent = folder.parentId ? meta.folders.find(f => f.id === folder.parentId) : null
+        const newPath = _uniqueFolderPath(meta, parent ? `${parent.path}/${slug(name)}` : slug(name), folder.id)
+        // The name lives only in localStorage, so a rename that didn't also move
+        // the storage objects vanished on any other device and on any cache
+        // clear. Relocate for real, then record the label.
+        if (newPath !== folder.path) await _relocateFolder(meta, folder, newPath)
+        folder.name = name
         saveMeta(meta)
         return folder
     },
@@ -773,74 +1315,78 @@ export const foldersAPI = {
         if (newParentId && (newParentId === folderId || isDescendant(newParentId, folderId))) {
             throw new Error('Cannot move folder into itself or a descendant')
         }
+        if ((folder.parentId || null) === (newParentId || null)) return folder
 
-        folder.parentId = newParentId || null
-
-        // Recompute path
         const newParent = newParentId ? meta.folders.find(f => f.id === newParentId) : null
+        if (newParentId && !newParent) throw new Error('Destination folder not found')
         const folderSlug = folder.path.split('/').pop()
-        folder.path = newParent ? `${newParent.path}/${folderSlug}` : folderSlug
+        const oldFolderPath = folder.path
+        const newPath = _uniqueFolderPath(meta, newParent ? `${newParent.path}/${folderSlug}` : folderSlug, folder.id)
 
+        // This used to rewrite folder.path and nothing else: descendant folders
+        // kept their old paths, every file inside still pointed at the old
+        // location, and not one storage object moved. The next cloud sync then
+        // resurrected the old tree from its .keep markers, so the move both
+        // failed to stick and left ghost folders behind. Move the objects.
+        // Re-parent BEFORE awaiting: _relocateFolder commits its path rewrite
+        // and only then reports a partial failure, and an early return there
+        // used to leave folder.path at the new location while parentId still
+        // named the old parent — a folder that the tree and the storage prefix
+        // disagreed about, which then dragged the wrong children into a delete.
+        const previousParent = folder.parentId || null
+        folder.parentId = newParentId || null
+        try {
+            await _relocateFolder(meta, folder, newPath)
+        } catch (err) {
+            if (folder.path === oldFolderPath) folder.parentId = previousParent
+            saveMeta(meta)
+            throw err
+        }
         saveMeta(meta)
         return folder
     },
 
     async delete(folderId) {
         const meta = loadMeta()
-        const toDelete = []
-        const collect = (id) => {
-            const f = meta.folders.find(x => x.id === id)
-            if (!f) return
-            toDelete.push(f)
-            meta.folders.filter(x => x.parentId === id).forEach(child => collect(child.id))
+        const target = await _collectFolderDeletion(meta, folderId)
+        if (!target) return
+
+        const failed = await _deleteObjects(target.paths)
+        // Dropping the records now would report a clean delete over objects
+        // that are still in Storage — and the next sync would bring the folder
+        // back anyway, minus whatever the user thinks they deleted.
+        if (failed.length) {
+            throw new Error(`Could not delete ${failed.length} of ${target.paths.length} items in "${target.root.name}" — the folder was left in place`)
         }
-        collect(folderId)
 
-        const allFiles = toDelete.flatMap(f => f.files)
-        const keepMarkers = toDelete.map(f => f.path + '/.keep')
-        allFiles.forEach(f => contentCache.delete(f.path))
-        await Promise.all([
-            ...allFiles.map(f => vaultAPI.deleteFile(f.path).catch(() => {})),
-            ...keepMarkers.map(p => vaultAPI.deleteFile(p).catch(() => {})),
-        ])
-
-        const deleteIds = new Set(toDelete.map(f => f.id))
+        const deleteIds = new Set(target.folders.map(f => f.id))
         meta.folders = meta.folders.filter(f => !deleteIds.has(f.id))
         saveMeta(meta)
     },
 
     async deleteWithProgress(folderId, onProgress) {
         const meta = loadMeta()
-        const toDelete = []
-        const collect = (id) => {
-            const f = meta.folders.find(x => x.id === id)
-            if (!f) return
-            toDelete.push(f)
-            meta.folders.filter(x => x.parentId === id).forEach(child => collect(child.id))
-        }
-        collect(folderId)
+        const target = await _collectFolderDeletion(meta, folderId)
+        if (!target) return
 
-        const allFiles = toDelete.flatMap(f => f.files)
-        const keepMarkers = toDelete.map(f => f.path + '/.keep')
-        const allPaths = [...allFiles.map(f => f.path), ...keepMarkers]
+        const allPaths = target.paths
         const total = allPaths.length || 1
         let done = 0
+        const tick = () => { done++; if (onProgress) onProgress(done, total) }
 
         // Delete in parallel batches instead of strictly one at a time — the
         // progress bar still ticks, but a 60-file folder no longer takes 60
         // sequential round-trips.
         const BATCH = 8
+        const failed = []
         for (let i = 0; i < allPaths.length; i += BATCH) {
-            const batch = allPaths.slice(i, i + BATCH)
-            await Promise.all(batch.map(async path => {
-                await vaultAPI.deleteFile(path).catch(() => {})
-                contentCache.delete(path)
-                done++
-                if (onProgress) onProgress(done, total)
-            }))
+            failed.push(...await _deleteObjects(allPaths.slice(i, i + BATCH), tick))
+        }
+        if (failed.length) {
+            throw new Error(`Could not delete ${failed.length} of ${allPaths.length} items in "${target.root.name}" — the folder was left in place`)
         }
 
-        const deleteIds = new Set(toDelete.map(f => f.id))
+        const deleteIds = new Set(target.folders.map(f => f.id))
         meta.folders = meta.folders.filter(f => !deleteIds.has(f.id))
         saveMeta(meta)
     },
@@ -883,9 +1429,15 @@ export const filesAPI = {
         const cleanTitle = cleanLabel(title, 'File title')
         assertNoteSize(content)
         const base = slug(cleanTitle)
-        const taken = new Set(folder.files.map(f => f.path))
+        const taken = new Set(meta.folders.flatMap(f => f.files.map(x => x.path)))
         let path = `${folder.path}/${base}.md`
         for (let n = 2; taken.has(path); n++) path = `${folder.path}/${base}-${n}.md`
+        // `taken` only knows what this browser has synced. Storage overwrites
+        // unconditionally, so a note another device created under this name —
+        // or one a pruned record left behind — would be replaced with no error
+        // and no trace. That is how an import of "groceries.md" could wipe an
+        // existing Groceries note. Ask Storage before claiming the path.
+        path = await _freeCloudPath(folder.path, base, path, null)
 
         const now = new Date().toISOString()
         const file = {
@@ -915,12 +1467,26 @@ export const filesAPI = {
         const file = folder.files.find(f => f.id === fileId)
         if (!file) throw new Error('File not found')
 
-        const cached = contentCache.getSync(file.path)
+        // getSync only answers for notes held in memory; a note evicted from
+        // the LRU (or too big to have been warmed) still has its body on disk.
+        const cached = contentCache.getSync(file.path) || await contentCache.get(file.path)
         if (cached) {
             file.content = cached.content
             file.contentLoaded = true
             saveMeta(meta)
             _revalidate(file, meta, onFresh)
+            return file
+        }
+
+        // A queued write is by definition newer than anything Storage can hand
+        // back, and the cache entry that held it may since have been evicted.
+        // Reading the cloud here would quietly restore the pre-edit body.
+        const pending = _loadPending()[file.path]
+        if (pending) {
+            file.content = pending.content
+            file.contentLoaded = true
+            contentCache.set(file.path, pending.content)
+            saveMeta(meta)
             return file
         }
 
@@ -946,29 +1512,89 @@ export const filesAPI = {
         const file = folder.files.find(f => f.id === fileId)
         if (!file) throw new Error('File not found')
 
-        if (title !== undefined) file.title = cleanLabel(title, 'File title')
+        // A title-only update is the rename action. The label lives in
+        // localStorage alone, so unless the storage object follows it the note
+        // shows up under its creation slug on every other device and after any
+        // cache clear. The editor's save sends content too and is left alone —
+        // a save must not turn into a copy-verify-delete.
+        if (title !== undefined && content === undefined) return filesAPI.rename(folderId, fileId, title)
+        // A save carrying both is the editor's. Write the body first, then let
+        // the rename below relocate the object — doing it the other way round
+        // would write the note to a path the rename is about to delete.
+        const renameTo = title !== undefined && cleanLabel(title, 'File title') !== file.title
+            ? cleanLabel(title, 'File title')
+            : null
         if (content !== undefined) {
             assertNoteSize(content)
             file.content = content
             _noteLocalWrite(file.path)      // invalidate any prefetch in flight
             contentCache.set(file.path, content)
+            // Queue BEFORE the upload, not only when it fails. A save that is
+            // still in flight when the tab closes never reaches its catch, so
+            // the edit would exist nowhere durable; the entry below is dropped
+            // again the moment the write is confirmed. This also settles the
+            // race with a concurrent flush: two PUTs to one object are ordered
+            // by arrival, so an older queued body could otherwise land last.
+            offlineQueue.enqueue(file.path, content)
             try {
-                await vaultAPI.writeFile(file.path, content)
+                await _withPathLock(file.path, () => vaultAPI.writeFile(file.path, content))
             } catch (err) {
-                // The IndexedDB cache already holds this edit; queue it now as
-                // well so a tab close immediately after an offline save cannot
-                // strand the only durable copy on this device.
-                offlineQueue.enqueue(file.path, content)
+                // The entry queued before the upload is the durable copy; make
+                // sure it is still there (a concurrent flush may have drained it).
+                const rescued = _loadPending()[file.path] ? true : offlineQueue.enqueue(file.path, content)
                 file.updated_at = new Date().toISOString()
                 saveMeta(meta)
+                // Without a queue entry nothing will ever retry this upload, so
+                // the edit would live on this device only — silently.
+                if (!rescued) {
+                    const stranded = new Error(`${err.message} — and this browser's storage is full, so the edit could not be queued for upload`)
+                    stranded.status = err.status
+                    throw stranded
+                }
                 throw err
             }
-            // This save supersedes anything still queued for the path — an
-            // optimistic create's queued body, or an earlier failed save.
-            // Leaving it queued would let a later flush overwrite what we just
-            // wrote with older content.
-            offlineQueue.dequeue(file.path)
+            // The upload is confirmed, so the rescue entry has done its job.
+            // Drop it only if it is still the body we just wrote: an edit made
+            // during the upload must stay queued, or it would be lost.
+            offlineQueue.dequeueIfUnchanged(file.path, content)
         }
+        file.updated_at = new Date().toISOString()
+        saveMeta(meta)
+        // Retitling from the editor has to reach storage too, or the note keeps
+        // its original slug everywhere but this browser. It runs after the body
+        // is safely written, and a failure here leaves the note intact under its
+        // old name rather than losing the save.
+        if (renameTo) return filesAPI.rename(folderId, fileId, renameTo)
+        return file
+    },
+
+    // Rename a note, object and all. Same copy-verify-delete as a move: the
+    // body that gets copied must be the newest one that exists, and the
+    // original only goes once the copy has been read back.
+    async rename(folderId, fileId, newTitle) {
+        const meta = loadMeta()
+        const folder = meta.folders.find(f => f.id === folderId)
+        if (!folder) throw new Error('Folder not found')
+        const file = folder.files.find(f => f.id === fileId)
+        if (!file) throw new Error('File not found')
+
+        const title = cleanLabel(newTitle, 'File title')
+        const oldPath = file.path
+        const base = slug(title)
+        const taken = new Set(
+            meta.folders.flatMap(f => f.files.map(x => x.path)).filter(p => p !== oldPath),
+        )
+        let newPath = `${folder.path}/${base}.md`
+        for (let n = 2; taken.has(newPath); n++) newPath = `${folder.path}/${base}-${n}.md`
+        newPath = await _freeCloudPath(folder.path, base, newPath, oldPath)
+
+        if (newPath !== oldPath) {
+            const content = await _authoritativeBody(file)
+            if (content === null) throw new Error('Cannot rename a note that no longer exists in the cloud')
+            await _relocateObject(file, newPath, content)
+        }
+
+        file.title = title
         file.updated_at = new Date().toISOString()
         saveMeta(meta)
         return file
@@ -980,8 +1606,11 @@ export const filesAPI = {
         if (!folder) throw new Error('Folder not found')
         const file = folder.files.find(f => f.id === fileId)
         if (file) {
-            await vaultAPI.deleteFile(file.path)
-            contentCache.delete(file.path)
+            // Deleting a note moves it to the recycle bin. _trashObject owns
+            // the queue handling and throws if the note could not be binned, in
+            // which case it is still where it was.
+            const body = (file.contentLoaded && file.content) || null
+            await _trashObject(file.path, body)
         }
         folder.files = folder.files.filter(f => f.id !== fileId)
         saveMeta(meta)
@@ -994,55 +1623,84 @@ export const filesAPI = {
         const folder = meta.folders.find(f => f.id === folderId)
         if (!folder) return
         const file = folder.files.find(f => f.id === fileId)
-        if (file) contentCache.delete(file.path)
+        if (file) {
+            // The 404 is authoritative, so a queued write for this path would
+            // only recreate a note the cloud has already lost.
+            offlineQueue.dequeue(file.path)
+            contentCache.delete(file.path)
+        }
         folder.files = folder.files.filter(f => f.id !== fileId)
         saveMeta(meta)
     },
 
-    // Move a file to a different folder
+    // Move a file to a different folder.
+    //
+    // A move is a copy-then-delete, so the body it copies MUST be the newest
+    // one that exists. The old version trusted `file.content` and then the
+    // in-memory cache, and deleted the original regardless of what it had
+    // written. Both of those can be empty or stale — a note whose body was
+    // never loaded, or one evicted from the cache — and on 2026-09-15 that
+    // turned a 15,779-byte note into a 0-byte file and silently dropped four
+    // lines from another. Now: take the newest body, refuse to write a blank
+    // over a non-blank note, verify the copy landed, and only then delete.
     async move(sourceFolderId, fileId, targetFolderId) {
         const meta = loadMeta()
         const sourceFolder = meta.folders.find(f => f.id === sourceFolderId)
         const targetFolder = meta.folders.find(f => f.id === targetFolderId)
         if (!sourceFolder || !targetFolder) return null  // silently no-op if folder is missing
+        if (sourceFolderId === targetFolderId) return null
         const fileIdx = sourceFolder.files.findIndex(f => f.id === fileId)
         if (fileIdx === -1) throw new Error('File not found')
 
         const file = sourceFolder.files[fileIdx]
         const fileName = file.path.split('/').pop()
         const oldPath = file.path
-        const taken = new Set(targetFolder.files.map(f => f.path))
+        const taken = new Set(meta.folders.flatMap(f => f.files.map(x => x.path)))
         const stem = fileName.replace(/\.md$/, '')
         let newPath = `${targetFolder.path}/${fileName}`
         for (let n = 2; taken.has(newPath); n++) newPath = `${targetFolder.path}/${stem}-${n}.md`
+        newPath = await _freeCloudPath(targetFolder.path, stem, newPath, oldPath)
+        if (newPath === oldPath) return file
 
-        // Read content, write to new path, delete old
-        let content = file.content || ''
-        if (!file.contentLoaded) {
-            const cached = contentCache.getSync(oldPath)
-            if (cached) content = cached.content
-            else {
-                const result = await vaultAPI.readFileResult(oldPath)
-                if (result.missing) throw new Error('Cannot move a note that no longer exists in the cloud')
-                content = result.content
+        // ── Pick the authoritative body ───────────────────────────
+        // A queued write is by definition newer than anything in the cloud.
+        const queued = _loadPending()[oldPath]
+        let content
+        if (queued) {
+            content = queued.content
+        } else {
+            // Otherwise the cloud object is the source of truth. The local copy
+            // may be an unsaved draft that is newer, so keep whichever is longer
+            // only when the cloud read fails outright.
+            const result = await vaultAPI.readFileResult(oldPath)
+            if (result.missing) throw new Error('Cannot move a note that no longer exists in the cloud')
+            content = result.content
+            if (file.contentLoaded && file.content && file.content !== content) {
+                // An unsaved edit is in the editor. Never discard it.
+                content = file.content
             }
         }
-        await vaultAPI.writeFile(newPath, content)
-        try {
-            await vaultAPI.deleteFile(oldPath)
-        } catch (err) {
-            // Keep a failed move atomic from the user's point of view. If the
-            // old object could not be removed, roll back the newly-written copy
-            // instead of creating a duplicate on the next cloud sync.
-            await vaultAPI.deleteFile(newPath).catch(() => {})
-            throw err
-        }
-        contentCache.rename(oldPath, newPath)
 
-        file.path = newPath
-        sourceFolder.files.splice(fileIdx, 1)
-        targetFolder.files.unshift(file)
-        saveMeta(meta)
+        // Last line of defence: never let a move blank a note.
+        const localBody = (file.contentLoaded && file.content) || contentCache.getSync(oldPath)?.content || ''
+        if (!content && localBody) content = localBody
+        if (!content && !queued) {
+            const probe = await vaultAPI.readFileResult(oldPath)
+            if (!probe.missing && probe.content) content = probe.content
+        }
+
+        await _relocateObject(file, newPath, content)
+
+        // Re-resolve the position: `fileIdx` was read before several awaits,
+        // and another move completing in the meantime shifts the array — the
+        // stale index would splice out whichever note had moved up into it.
+        const liveMeta = loadMeta()
+        const liveSource = liveMeta.folders.find(f => f.id === sourceFolderId) || sourceFolder
+        const liveTarget = liveMeta.folders.find(f => f.id === targetFolderId) || targetFolder
+        const idx = liveSource.files.findIndex(f => f.id === fileId)
+        if (idx !== -1) liveSource.files.splice(idx, 1)
+        if (!liveTarget.files.some(f => f.id === fileId)) liveTarget.files.unshift(file)
+        saveMeta(liveMeta)
         return file
     },
 }
@@ -1062,11 +1720,18 @@ export function contentFor(file) {
 
 // Check the cloud copy of an already-cached note without making the caller wait.
 function _revalidate(file, meta, onFresh) {
+    // A queued write means the local copy is strictly newer than the cloud's;
+    // adopting the cloud body here would revert the editor to the pre-edit text
+    // and the next save would then drop the queue entry that still held it.
+    if (_loadPending()[file.path]) return
+    const seqBefore = _writeSeq.get(file.path) || 0
     vaultAPI.readFileResult(file.path)
         .then(({ content: fresh, missing }) => {
             // The object isn't there (yet). That is not evidence the note is
             // empty — keep what we have rather than blanking it.
             if (missing) return
+            if ((_writeSeq.get(file.path) || 0) !== seqBefore) return   // a save won the race
+            if (_loadPending()[file.path]) return                       // queued while we read
             if (fresh === file.content) return
             // Likewise never let an empty read replace content we already hold.
             if (fresh === '' && file.content) return
@@ -1173,8 +1838,8 @@ foldersAPI.listFromCloud = async function () {
 const LEGACY_PENDING_SAVES_KEY = 'nc_pending_saves'
 
 function pendingSavesKey() {
-    const user = auth.getUser()
-    return user ? `nc_pending_saves_${user.user_id}` : 'nc_pending_saves_anon'
+    const uid = _currentUid()
+    return uid ? `nc_pending_saves_${uid}` : 'nc_pending_saves_anon'
 }
 
 function _loadPending() {
@@ -1197,7 +1862,22 @@ function _loadPending() {
 }
 
 function _savePending(map) {
-    try { localStorage.setItem(pendingSavesKey(), JSON.stringify(map)) } catch { /* quota */ }
+    try { localStorage.setItem(pendingSavesKey(), JSON.stringify(map)); return true }
+    catch (err) { _storageFull(err); return false }
+}
+
+// True when a queued write names an object this browser no longer has a record
+// of — a note or folder deleted since it was queued. Replaying it would put the
+// object back in Storage and the next listing would mint a fresh record for it.
+// An empty meta means "nothing synced yet", not "everything was deleted", so it
+// never condemns an entry.
+function _isOrphanedQueueEntry(path, meta) {
+    if (!meta.folders.length) return false
+    if (path.endsWith('/.keep')) {
+        const folderPath = path.slice(0, -'/.keep'.length)
+        return !meta.folders.some(f => f.path === folderPath)
+    }
+    return !meta.folders.some(f => f.files.some(x => x.path === path))
 }
 
 let _flushPromise = null
@@ -1210,7 +1890,7 @@ export const offlineQueue = {
     enqueue(path, content) {
         const map = _loadPending()
         map[path] = { content, queued_at: new Date().toISOString() }
-        _savePending(map)
+        return _savePending(map)
     },
 
     dequeue(path) {
@@ -1241,6 +1921,12 @@ export const offlineQueue = {
     flush() {
         if (_flushPromise) return _flushPromise
         _flushPromise = (async () => {
+            // Yield before touching the queue, so the assignment above lands
+            // first. An empty queue runs this body to completion synchronously,
+            // and the `finally` would then clear a slot that is filled a moment
+            // later with an already-resolved promise — parking it there and
+            // turning every flush for the rest of the session into a no-op.
+            await Promise.resolve()
             let done = 0
             try {
                 for (const path of Object.keys(_loadPending())) {
@@ -1248,14 +1934,29 @@ export const offlineQueue = {
                     // superseded or removed this entry.
                     const entry = _loadPending()[path]
                     if (!entry) continue
+                    if (_isOrphanedQueueEntry(path, loadMeta())) {
+                        offlineQueue.dequeue(path)
+                        continue
+                    }
+                    const seq = _writeSeq.get(path) || 0
+                    let wrote
                     try {
-                        await vaultAPI.writeFile(path, entry.content)
+                        wrote = await _withPathLock(path, async () => {
+                            // A foreground save that landed while this entry
+                            // waited for the lock holds newer content: it has
+                            // either dropped the entry or repointed it.
+                            const current = _loadPending()[path]
+                            if (!current || current.content !== entry.content) return false
+                            if ((_writeSeq.get(path) || 0) !== seq) return false
+                            await vaultAPI.writeFile(path, entry.content)
+                            return true
+                        })
                     } catch {
                         // Still failing — keep it queued and stop trying for now
                         break
                     }
                     offlineQueue.dequeueIfUnchanged(path, entry.content)
-                    done++
+                    if (wrote) done++
                 }
             } finally {
                 _flushPromise = null
@@ -1271,7 +1972,17 @@ export const offlineQueue = {
 // replayed next session rather than losing it; a success dequeues it.
 function backgroundWrite(path, content) {
     offlineQueue.enqueue(path, content)
-    vaultAPI.writeFile(path, content)
+    const seq = _writeSeq.get(path) || 0
+    _withPathLock(path, async () => {
+        // A real save landing first makes this optimistic body stale, and an
+        // optimistic body is usually empty — writing it now would blank the note.
+        if ((_writeSeq.get(path) || 0) !== seq) return
+        await vaultAPI.writeFile(path, content)
+        // The note may have been moved or deleted while this upload was in
+        // flight, in which case the object just written is a resurrection: the
+        // next listing would mint a second record for it.
+        if (_isOrphanedQueueEntry(path, loadMeta())) await vaultAPI.deleteFile(path).catch(() => {})
+    })
         .then(() => offlineQueue.dequeueIfUnchanged(path, content))
         .catch(() => { syncStatus._set('offline') })
 }

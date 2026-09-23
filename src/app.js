@@ -1,6 +1,7 @@
 // src/app.js
-import { foldersAPI, filesAPI, auth, vaultAPI, syncStatus, offlineQueue, contentFor, cacheReady } from './api.js'
+import { foldersAPI, filesAPI, auth, vaultAPI, syncStatus, offlineQueue, contentFor, cacheReady, trashAPI } from './api.js'
 import { ensureMarked, ensureHljs, ensureKatex, ensureMermaid, warmMarked, needsMath } from './lazy.js'
+import { contentCache } from './cache.js'
 import DOMPurify from 'dompurify'
 
 const EDITOR_MODE_KEY     = 'nc_editor_mode'
@@ -44,7 +45,13 @@ function fileSlugOf(file) {
     return file.id || null
 }
 
-function pushHash(folderPath, fileRef) {
+// `replace` is for a URL the app is *correcting* rather than one the user asked
+// for. A history entry can point at a note that has since been deleted, or at a
+// folder that has since been renamed; the renderers then downgrade to the
+// nearest view they can show and write that back. Pushing the correction stacks
+// a new entry on top of the one the user just went back to, so the next Back
+// lands on the unresolvable entry again and the trip repeats forever.
+function pushHash(folderPath, fileRef, { replace = false } = {}) {
     let hash
     if (!folderPath) {
         hash = '#/'
@@ -53,7 +60,9 @@ function pushHash(folderPath, fileRef) {
     } else {
         hash = '#/' + folderPath + '//' + fileRef
     }
-    if (location.hash !== hash) history.pushState(null, '', hash)
+    if (location.hash === hash) return
+    if (replace) history.replaceState(null, '', hash)
+    else history.pushState(null, '', hash)
 }
 
 function readHash() {
@@ -113,6 +122,11 @@ export class ThoughtCollector {
         this._hasSynced = foldersAPI.list().length > 0
         this._syncFailed = false
         this._pendingHash = null
+        // True for the duration of a popstate-driven restore, so the renderers
+        // can tell "the user asked for this" from "we are tidying up the URL".
+        this._restoring = false
+        // Dismiss callbacks for dialogs currently on screen (see _trapModal)
+        this._openModals = new Set()
         // Outline panel open state
         this._outlineOpen = false
         // Backlinks panel open state
@@ -123,34 +137,56 @@ export class ThoughtCollector {
         this._applyTheme(savedTheme)
 
         this._restoreFromHash()
-        this._popstateHandler = () => this._restoreFromHash()
+        // A history navigation — browser Back, the iOS edge swipe — cannot be
+        // cancelled, and the re-render below throws the editor's DOM away, so
+        // whatever is in the textarea has to be written out here or it is gone.
+        // The flag is cleared either way: left standing it resurfaced later as
+        // an "unsaved changes" prompt about a note the user had already left.
+        this._popstateHandler = () => {
+            if (this.view === 'editor' && this.editorDirty) this.flushSave({ force: true })
+            this.editorDirty = false
+            this._restoring = true
+            try { this._restoreFromHash() } finally { this._restoring = false }
+        }
         window.addEventListener('popstate', this._popstateHandler)
 
-        // Global keyboard shortcuts
+        // Global keyboard shortcuts. Each branch swallows the browser's own
+        // shortcut before deciding whether to act: with a dialog already up we
+        // open nothing (a second palette would only stack on the first), but
+        // handing Cmd+P back to the browser would raise the print dialog over
+        // the box the user is looking at.
         this._globalKeyHandler = (e) => {
             // Command palette: Ctrl/Cmd+P
             if (e.key === 'p' && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault()
+                if (this._overlayOpen()) return
                 this._showCommandPalette()
                 return
             }
             // Quick switcher: Ctrl/Cmd+O
             if (e.key === 'o' && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault()
+                if (this._overlayOpen()) return
                 this._showQuickSwitcher()
                 return
             }
             // Graph view: Ctrl/Cmd+G (when not in textarea)
             if (e.key === 'g' && (e.metaKey || e.ctrlKey) && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
                 e.preventDefault()
+                if (this._overlayOpen()) return
                 this._showGraphView()
                 return
             }
         }
         document.addEventListener('keydown', this._globalKeyHandler)
 
+        // Leaving the note / walking back up the folder tree. A dialog on screen
+        // owns Escape outright: acting on it down here as well would throw the
+        // user out of the note behind the command palette, and would reopen the
+        // "unsaved changes" confirm in the same keypress that dismissed it.
         this._escHandler = async (e) => {
             if (e.key === 'Escape') {
+                if (this._overlayOpen()) return
                 if (this._saving) {
                     this._toast('Please wait — save in progress...')
                     return
@@ -161,13 +197,13 @@ export class ThoughtCollector {
                         if (!ok) return
                     }
                     this.editorDirty = false
-                    this._navigate('files')
+                    this._navigate('files', { replace: true })
                 } else if (this.view === 'files') {
                     const parent = this.currentFolder?.parentId
                         ? foldersAPI.list().find(f => f.id === this.currentFolder.parentId)
                         : null
-                    if (parent) this._navigate('files', { folder: parent })
-                    else this._navigate('folders')
+                    if (parent) this._navigate('files', { folder: parent, replace: true })
+                    else this._navigate('folders', { replace: true })
                 }
             }
         }
@@ -208,20 +244,41 @@ export class ThoughtCollector {
 
     // ── Flush the current editor's content to cloud (or offline queue) ──
     // Used by pagehide/visibility paths where we can't await a full save.
-    flushSave() {
-        if (this._saving || !this.editorDirty) return
+    // Returns the write promise for the paths that can wait for it.
+    // `force` is for the paths that are about to destroy the editor's DOM
+    // (history navigation, tab close). A save already in flight only carries
+    // the snapshot it took when it started; anything typed since then lives
+    // only in the textarea, so it has to be queued now rather than skipped.
+    flushSave({ force = false } = {}) {
+        if (!this.editorDirty) return
+        if (this._saving && !force) return
         if (this.view !== 'editor' || !this.currentFolder || !this.currentFile) return
+        // A note whose body we never managed to read has nothing to write back;
+        // a save here would push an empty document over the real one.
+        if (!this.currentFile.contentLoaded) return
         const titleInput  = this.container.querySelector('#file-title')
         const contentArea = this.container.querySelector('#file-content')
         if (!contentArea) return
         const content = contentArea.value
         const title = titleInput ? titleInput.value : this.currentFile.title
+        const path = this.currentFile.path
         // Optimistically clear the dirty flag so we don't double-fire.
         this.editorDirty = false
-        filesAPI.update(this.currentFolder.id, this.currentFile.id, { title, content })
+        if (this._saving) {
+            // Can't start a second write; park the newest text where it will be
+            // replayed, and let the in-flight save finish on its own.
+            if (path) offlineQueue.enqueue(path, content)
+            return
+        }
+        // The page is on its way out, so the promise below may never settle:
+        // neither .then nor .catch is guaranteed to run once the tab is gone.
+        // Queueing is a synchronous localStorage write and does survive that,
+        // so park the body there first — a completed update clears it again.
+        if (path) offlineQueue.enqueue(path, content)
+        return filesAPI.update(this.currentFolder.id, this.currentFile.id, { title, content })
             .catch(() => {
-                // Offline / failed — queue the raw write so it replays on reconnect.
-                if (this.currentFile.path) offlineQueue.enqueue(this.currentFile.path, content)
+                // Offline / failed — refresh the queued copy so it replays on reconnect.
+                if (path) offlineQueue.enqueue(path, content)
             })
     }
 
@@ -271,16 +328,24 @@ export class ThoughtCollector {
         clearTimeout(this._previewTimer)
         if (this._vvCleanup) { this._vvCleanup(); this._vvCleanup = null }
         if (this._syncUnsub) { this._syncUnsub(); this._syncUnsub = null }
+        if (this._scrollMirror) { this._scrollMirror.remove(); this._scrollMirror = null }
         if (this._autologoutActivityHandler) {
             const events = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll']
             events.forEach(ev => document.removeEventListener(ev, this._autologoutActivityHandler, true))
             this._autologoutActivityHandler = null
         }
         syncStatus.stopPolling()
+        // Someone is awaiting the answer to each of these. Ripping the nodes out
+        // without resolving leaves that await pending for the life of the page.
+        Array.from(this._openModals).forEach(dismiss => dismiss())
         document.querySelectorAll('.modal-overlay, .move-menu-overlay').forEach(el => el.remove())
     }
 
     async _triggerAutologout() {
+        // destroy() drops the editor's DOM and every timer pointing at it, so an
+        // unsaved note has to be written before that — and before auth.logout()
+        // invalidates the credentials the write needs.
+        await this.flushSave()
         this.destroy()
         try { await auth.logout() } catch (e) { /* ignore */ }
         this._toast('Logged out due to inactivity')
@@ -349,6 +414,21 @@ export class ThoughtCollector {
         }
     }
 
+    // Bring the header's theme control back in step after the theme was changed
+    // from somewhere else. Themes are nothing but CSS custom properties, so the
+    // switch itself needs no re-render — and a re-render while a note is open
+    // would repaint the textarea from the last saved body, discarding whatever
+    // has been typed since.
+    _syncThemePicker(themeId) {
+        const swatch = this.container.querySelector('.theme-toggle-swatch')
+        const label = this.container.querySelector('.theme-toggle-label')
+        if (swatch) swatch.setAttribute('data-theme', themeId)
+        if (label) label.textContent = THEMES.find(t => t.id === themeId)?.label || ''
+        this.container.querySelectorAll('.theme-dropdown-item').forEach(b => {
+            b.classList.toggle('active', b.dataset.theme === themeId)
+        })
+    }
+
     _isMobile() {
         // Width alone misclassifies modern iPhones in landscape (up to 932px)
         // as desktop. Keep the desktop layout for short laptop windows by also
@@ -360,7 +440,10 @@ export class ThoughtCollector {
     }
 
     // ── Routing ───────────────────────────────────────────────
-    _navigate(view, { folder, file } = {}) {
+    // `replace` belongs to the back-style controls. Pushing an entry for the
+    // view you just backed out of leaves the note you left sitting ahead of you
+    // in history, so the browser's own Back button walks straight into it again.
+    _navigate(view, { folder, file, replace = false } = {}) {
         // A deliberate navigation overrides wherever the cold-boot URL was
         // headed — don't teleport the user afterwards.
         this._pendingHash = null
@@ -371,12 +454,12 @@ export class ThoughtCollector {
         if (view === 'folders') {
             this.currentFolder = null
             this.currentFile   = null
-            pushHash(null, null)
+            pushHash(null, null, { replace })
         } else if (view === 'files' && this.currentFolder) {
             this.currentFile = null
-            pushHash(this.currentFolder.path, null)
+            pushHash(this.currentFolder.path, null, { replace })
         } else if (view === 'editor' && this.currentFolder && this.currentFile) {
-            pushHash(this.currentFolder.path, fileSlugOf(this.currentFile))
+            pushHash(this.currentFolder.path, fileSlugOf(this.currentFile), { replace })
         }
         this._render()
     }
@@ -447,9 +530,160 @@ export class ThoughtCollector {
         // Tear down any editor-specific viewport listener before re-rendering
         // so handlers don't stack across views.
         if (this._vvCleanup) { this._vvCleanup(); this._vvCleanup = null }
+        // Timers armed by the view we are leaving still hold references to its
+        // note. Letting an autosave fire after navigation overwrote
+        // this.currentFile with the note the user had just left, so renames and
+        // saves afterwards targeted the wrong file.
+        clearTimeout(this._autosaveTimer)
+        clearTimeout(this._previewTimer)
+        // Rescue whatever is in the editor before the DOM holding it goes away.
+        // A re-render reached from inside the editor — creating a folder, an
+        // import, a drop on the sidebar — would otherwise repaint the textarea
+        // from the last saved body and drop everything typed since.
+        if (this.view === 'editor' && this.editorDirty) {
+            const live = this.container.querySelector('#file-content')
+            if (live) this._liveBody = live.value
+        }
         if (this.view === 'folders') this._renderFolders()
         else if (this.view === 'files') this._renderFiles()
+        else if (this.view === 'trash') this._renderTrash()
         else if (this.view === 'editor') this._renderEditor()
+    }
+
+    // ── Recycle bin ───────────────────────────────────────────
+    // Notes deleted in the last 30 days, newest first. The list comes from
+    // Storage rather than local state, so it is the same on every device and a
+    // cleared browser cache cannot lose it.
+    _renderTrash() {
+        const body = `
+            <div class="toolbar">
+                <span class="section-label">Recycle bin</span>
+                <div class="toolbar-actions">
+                    <button class="cyber-btn compact-btn" id="trash-back-btn">
+                        <span class="btn-text">&larr; Folders</span>
+                        <span class="btn-glow"></span>
+                    </button>
+                    <button class="cyber-btn compact-btn danger" id="trash-empty-btn" disabled>
+                        <span class="btn-text">Empty bin</span>
+                        <span class="btn-glow"></span>
+                    </button>
+                </div>
+            </div>
+            <p class="trash-note">Deleted notes stay here for ${trashAPI.retentionDays} days, then go for good.</p>
+            <div class="trash-list" id="trash-list">
+                <div class="empty-state"><p class="empty-title">Loading&hellip;</p></div>
+            </div>`
+
+        this.container.innerHTML = this._shell(body)
+        this._bindShell()
+
+        this.container.querySelector('#trash-back-btn')
+            .addEventListener('click', () => this._navigate('folders'))
+
+        const list = this.container.querySelector('#trash-list')
+        const emptyBtn = this.container.querySelector('#trash-empty-btn')
+
+        const paint = (items) => {
+            emptyBtn.disabled = items.length === 0
+            if (!items.length) {
+                list.innerHTML = `
+                    <div class="empty-state">
+                        <p class="empty-title">Recycle bin is empty</p>
+                        <p class="empty-sub">Notes you delete will wait here for ${trashAPI.retentionDays} days</p>
+                    </div>`
+                return
+            }
+            const now = Date.now()
+            list.innerHTML = items.map(item => {
+                const left = Math.max(0, Math.ceil((item.expiresAt - now) / 86400000))
+                return `
+                <div class="trash-card" data-path="${this._esc(item.trashPath)}">
+                    <div class="trash-card-main">
+                        <div class="trash-title">${this._esc(item.title)}</div>
+                        <div class="trash-meta">
+                            <span class="trash-origin">${this._esc(item.folderPath || 'root')}</span>
+                            <span class="trash-sep">&middot;</span>
+                            <span class="trash-left">${left} day${left === 1 ? '' : 's'} left</span>
+                        </div>
+                    </div>
+                    <div class="trash-actions">
+                        <button class="icon-btn trash-restore-btn" aria-label="Restore ${this._esc(item.title)}">restore</button>
+                        <button class="icon-btn trash-purge-btn" aria-label="Delete ${this._esc(item.title)} permanently">delete</button>
+                    </div>
+                </div>`
+            }).join('')
+
+            list.querySelectorAll('.trash-restore-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const card = btn.closest('.trash-card')
+                    btn.disabled = true
+                    try {
+                        const res = await trashAPI.restore(card.dataset.path)
+                        this._toast(res.renamed
+                            ? `Restored as "${res.path.split('/').pop().replace(/\.md$/, '')}" — the old name was taken`
+                            : 'Restored')
+                        await refresh()
+                    } catch (err) {
+                        btn.disabled = false
+                        this._toast(`Restore failed: ${err.message}`)
+                    }
+                })
+            })
+
+            list.querySelectorAll('.trash-purge-btn').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const card = btn.closest('.trash-card')
+                    const title = card.querySelector('.trash-title').textContent
+                    const ok = await this._showModal({
+                        type: 'confirm',
+                        title: 'DELETE PERMANENTLY',
+                        message: `Delete "${title}" for good? This cannot be undone.`,
+                        danger: true,
+                    })
+                    if (!ok) return
+                    try {
+                        await trashAPI.purge(card.dataset.path)
+                        await refresh()
+                    } catch (err) {
+                        this._toast(`Delete failed: ${err.message}`)
+                    }
+                })
+            })
+        }
+
+        const refresh = async () => {
+            try {
+                paint(await trashAPI.list())
+            } catch (err) {
+                list.innerHTML = `
+                    <div class="empty-state">
+                        <p class="empty-title">Could not load the recycle bin</p>
+                        <p class="empty-sub">${this._esc(err.message)}</p>
+                    </div>`
+                emptyBtn.disabled = true
+            }
+            // The view can be left while the listing is in flight.
+            if (this.view !== 'trash') return
+        }
+
+        emptyBtn.addEventListener('click', async () => {
+            const ok = await this._showModal({
+                type: 'confirm',
+                title: 'EMPTY RECYCLE BIN',
+                message: 'Delete everything in the bin for good? This cannot be undone.',
+                danger: true,
+            })
+            if (!ok) return
+            try {
+                const n = await trashAPI.empty()
+                this._toast(`Deleted ${n} item${n === 1 ? '' : 's'}`)
+                await refresh()
+            } catch (err) {
+                this._toast(`Could not empty the bin: ${err.message}`)
+            }
+        })
+
+        refresh()
     }
 
     // ── Shared shell ──────────────────────────────────────────
@@ -578,6 +812,7 @@ export class ThoughtCollector {
                     <button class="sidebar-folder ${isActive ? 'active' : ''}"
                             data-folder-id="${f.id}"
                             data-drop-folder-id="${f.id}"
+                            ${hasChildren ? `aria-expanded="${!isCollapsed}"` : ''}
                             style="padding-left: calc(0.75rem + ${indent}px)"
                             title="${this._esc(f.path)}">
                         <span class="sidebar-toggle" data-toggle-id="${f.id}">${hasChildren ? chevron : ''}</span>
@@ -653,11 +888,22 @@ export class ThoughtCollector {
         this._docListeners.push([type, handler])
     }
 
+    // Same contract as _onDocument, for listeners that only exist on `window`.
+    _onWindow(type, handler) {
+        window.addEventListener(type, handler)
+        this._winListeners = this._winListeners || []
+        this._winListeners.push([type, handler])
+    }
+
     _clearDocumentListeners() {
         if (this._docListeners) {
             this._docListeners.forEach(([type, fn]) => document.removeEventListener(type, fn))
         }
         this._docListeners = []
+        if (this._winListeners) {
+            this._winListeners.forEach(([type, fn]) => window.removeEventListener(type, fn))
+        }
+        this._winListeners = []
     }
 
     _bindShell() {
@@ -682,23 +928,35 @@ export class ThoughtCollector {
         const hamburger = this.container.querySelector('#mobile-menu-btn')
         const drawer = this.container.querySelector('#app-sidebar')
         const scrim = this.container.querySelector('#sidebar-scrim')
-        this._closeDrawer = () => {
-            if (drawer) drawer.classList.remove('open')
-            if (scrim) scrim.classList.remove('open')
+        // The drawer only overlays the page on narrow screens; on a wide one it
+        // is an ordinary column and must stay interactive.
+        const mainEl = this.container.querySelector('.app-main') || this.container.querySelector('main')
+        const setDrawerOpen = (open) => {
+            if (!drawer) return
+            drawer.classList.toggle('open', open)
+            if (scrim) scrim.classList.toggle('open', open)
             if (hamburger) {
-                hamburger.classList.remove('open')
-                hamburger.setAttribute('aria-expanded', 'false')
-            }
-        }
-        if (hamburger && drawer && scrim) {
-            hamburger.addEventListener('click', () => {
-                const open = !drawer.classList.contains('open')
-                drawer.classList.toggle('open', open)
-                scrim.classList.toggle('open', open)
                 hamburger.classList.toggle('open', open)
                 hamburger.setAttribute('aria-expanded', String(open))
+            }
+            // While it covers the page it is modal: everything behind it leaves
+            // the tab order, and a closed drawer takes its own buttons with it.
+            const overlaying = this._isMobile()
+            if (mainEl) mainEl.inert = overlaying && open
+            drawer.inert = overlaying && !open
+            if (open) drawer.querySelector('button, [href], input')?.focus?.({ preventScroll: true })
+        }
+        this._setDrawerOpen = setDrawerOpen
+        this._closeDrawer = () => setDrawerOpen(false)
+        if (hamburger && drawer && scrim) {
+            setDrawerOpen(drawer.classList.contains('open'))
+            hamburger.addEventListener('click', () => {
+                setDrawerOpen(!drawer.classList.contains('open'))
             })
             scrim.addEventListener('click', () => this._closeDrawer())
+            // Rotating to a wide layout turns the drawer back into an ordinary
+            // column; without this it would stay inert and unclickable.
+            this._onWindow('resize', () => setDrawerOpen(drawer.classList.contains('open')))
         }
 
         // ── Header overflow (kebab) menu — mobile ──
@@ -744,17 +1002,23 @@ export class ThoughtCollector {
                     if (!ok) return
                 }
                 this.editorDirty = false
-                if (this.view === 'editor') { this._navigate('files'); return }
+                if (this.view === 'editor') { this._navigate('files', { replace: true }); return }
                 const parent = this.currentFolder?.parentId
                     ? foldersAPI.list().find(f => f.id === this.currentFolder.parentId)
                     : null
-                if (parent) this._navigate('files', { folder: parent })
-                else this._navigate('folders')
+                if (parent) this._navigate('files', { folder: parent, replace: true })
+                else this._navigate('folders', { replace: true })
             })
         }
 
         // Logout
         this.container.querySelector('#logout-btn').addEventListener('click', async () => {
+            if (this._saving) { this._toast('Please wait — save in progress...'); return }
+            if (this.view === 'editor' && this.editorDirty) {
+                const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
+                if (!ok) return
+            }
+            this.editorDirty = false
             this.destroy()
             await auth.logout()
             this.onLogout()
@@ -803,15 +1067,7 @@ export class ThoughtCollector {
                 btn.addEventListener('click', () => {
                     this._applyTheme(btn.dataset.theme)
                     themeDropdown.classList.remove('open')
-                    // Update toggle button appearance
-                    const swatch = themeToggleBtn.querySelector('.theme-toggle-swatch')
-                    const label = themeToggleBtn.querySelector('.theme-toggle-label')
-                    if (swatch) swatch.setAttribute('data-theme', btn.dataset.theme)
-                    if (label) label.textContent = THEMES.find(t => t.id === btn.dataset.theme)?.label || ''
-                    // Update active state
-                    this.container.querySelectorAll('.theme-dropdown-item').forEach(b => {
-                        b.classList.toggle('active', b.dataset.theme === btn.dataset.theme)
-                    })
+                    this._syncThemePicker(btn.dataset.theme)
                 })
             })
         }
@@ -836,6 +1092,7 @@ export class ThoughtCollector {
                 const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
                 if (folder) this._navigate('files', { folder })
             })
+            this._bindSidebarFolderKeys(btn)
         })
 
         // Sidebar toggle buttons (chevrons without folder-id on the span)
@@ -851,17 +1108,12 @@ export class ThoughtCollector {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation()
                 if (this._saving) { this._toast('Please wait — save in progress...'); return }
-                if (this.editorDirty) {
-                    const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
-                    if (!ok) return
-                }
-                this.editorDirty = false
                 const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
                 if (!folder) return
                 const file = folder.files.find(f => f.id === btn.dataset.fileId)
                 if (file) {
                     this.currentFolder = folder
-                    this._openFile(file)
+                    await this._openFile(file)
                 }
             })
         })
@@ -942,6 +1194,26 @@ export class ThoughtCollector {
         })
     }
 
+    // The collapse chevron is a plain span inside the folder button, so a mouse
+    // can aim at it but a keyboard cannot: activating the button always reports
+    // the button itself as the target, and therefore always navigates. Left and
+    // Right are the tree-widget convention for collapsing and expanding a node.
+    _bindSidebarFolderKeys(btn) {
+        btn.addEventListener('keydown', (e) => {
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+            // Only folders with something to show carry aria-expanded, and only
+            // those have a chevron to operate.
+            if (!btn.hasAttribute('aria-expanded')) return
+            const id = btn.dataset.folderId
+            const collapsed = this._collapsedFolders.has(id)
+            if (e.key === 'ArrowLeft' ? collapsed : !collapsed) return
+            e.preventDefault()
+            this._toggleSidebarFolder(id)
+            // The list is rebuilt from scratch, taking the focused node with it.
+            this.container.querySelector(`.sidebar-folder[data-folder-id="${id}"]`)?.focus()
+        })
+    }
+
     _toggleSidebarFolder(folderId) {
         if (this._collapsedFolders.has(folderId)) {
             this._collapsedFolders.delete(folderId)
@@ -970,6 +1242,7 @@ export class ThoughtCollector {
                     const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
                     if (folder) this._navigate('files', { folder })
                 })
+                this._bindSidebarFolderKeys(btn)
             })
             this.container.querySelectorAll('.sidebar-toggle[data-toggle-id]').forEach(btn => {
                 btn.addEventListener('click', (e) => {
@@ -980,17 +1253,12 @@ export class ThoughtCollector {
             this.container.querySelectorAll('.sidebar-file-dot').forEach(btn => {
                 btn.addEventListener('click', async (e) => {
                     e.stopPropagation()
-                    if (this.editorDirty) {
-                        const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
-                        if (!ok) return
-                    }
-                    this.editorDirty = false
                     const folder = foldersAPI.list().find(f => f.id === btn.dataset.folderId)
                     if (!folder) return
                     const file = folder.files.find(f => f.id === btn.dataset.fileId)
                     if (file) {
                         this.currentFolder = folder
-                        this._openFile(file)
+                        await this._openFile(file)
                     }
                 })
             })
@@ -1004,7 +1272,7 @@ export class ThoughtCollector {
         // Keep the URL intact while a cold-boot destination is still pending —
         // rewriting it to "#/" here would erase the note the user asked for
         // before the listing arrives to resolve it.
-        if (!this._pendingHash) pushHash(null, null)
+        if (!this._pendingHash) pushHash(null, null, { replace: this._restoring })
         this._paintFolders(foldersAPI.listRoots())
 
         let retried = false
@@ -1041,9 +1309,9 @@ export class ThoughtCollector {
                         <span class="folder-meta">${f.files.length} file${f.files.length !== 1 ? 's' : ''}</span>
                     </div>
                     <div class="folder-actions">
-                        <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="folder" title="Move">mv</button>
-                        <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename">rn</button>
-                        <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete">x</button>
+                        <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="folder" title="Move" aria-label="Move folder ${this._esc(f.name)}">mv</button>
+                        <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename" aria-label="Rename folder ${this._esc(f.name)}">rn</button>
+                        <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete" aria-label="Delete folder ${this._esc(f.name)}">x</button>
                     </div>
                 </div>
             `).join('')
@@ -1083,6 +1351,10 @@ export class ThoughtCollector {
                         <span class="btn-glow"></span>
                     </button>
                     <input type="file" id="root-folder-file-input" webkitdirectory multiple style="display:none">
+                    <button class="cyber-btn compact-btn" id="trash-btn" title="Recently deleted notes">
+                        <span class="btn-text">Recycle bin</span>
+                        <span class="btn-glow"></span>
+                    </button>
                     <button class="cyber-btn compact-btn" id="new-folder-btn">
                         <span class="btn-text">+ New folder</span>
                         <span class="btn-glow"></span>
@@ -1097,6 +1369,10 @@ export class ThoughtCollector {
 
         this.container.querySelector('#new-folder-btn').addEventListener('click', () => {
             this._promptNewFolder(null)
+        })
+
+        this.container.querySelector('#trash-btn').addEventListener('click', () => {
+            this._navigate('trash')
         })
 
         const retryBtn = this.container.querySelector('#retry-sync-btn')
@@ -1151,8 +1427,17 @@ export class ThoughtCollector {
     _warmFolder(folder) {
         if (!folder) return
         foldersAPI.prefetchFolder(folder.id).catch(() => {})
+        // Write the times straight into the cards that are already on screen.
+        // Repainting the view instead would land a second or two after the user
+        // started reading it: the scroll position jumps back to the top, an open
+        // menu closes, and a drag in flight is cut because the handler holding
+        // the dragged id belongs to the DOM that just went away.
         foldersAPI.backfillTimes(folder.id, (f) => {
-            if (this.view === 'files' && this.currentFolder?.id === f.id) this._paintFiles()
+            if (this.view !== 'files' || this.currentFolder?.id !== f.id) return
+            for (const file of f.files) {
+                const meta = this.container.querySelector(`.file-card[data-id="${file.id}"] .file-meta`)
+                if (meta) meta.textContent = this._relTime(file.updated_at)
+            }
         }).catch(() => {})
     }
 
@@ -1174,7 +1459,10 @@ export class ThoughtCollector {
         const name = await this._showModal({ type: 'input', title: 'RENAME FOLDER', placeholder: 'New name...', defaultValue: folder.name })
         if (!name) return
         try {
-            foldersAPI.rename(id, name)
+            // Renaming now relocates the folder's cloud objects, so it is async
+            // and can fail — surface that instead of silently rendering a name
+            // change that never reached storage.
+            await foldersAPI.rename(id, name)
             this._render()
         } catch (err) {
             this._toast(`Error: ${err.message}`)
@@ -1200,9 +1488,10 @@ export class ThoughtCollector {
         const folder = foldersAPI.list().find((f) => f.id === id)
         if (!folder) return
         const childCount = foldersAPI.listChildren(id).length
-        const msg = childCount
-            ? `Delete "${folder.name}", all its subfolders, and all files?`
-            : `Delete "${folder.name}" and all its files?`
+        const what = childCount
+            ? `"${folder.name}", all its subfolders, and all their notes`
+            : `"${folder.name}" and all its notes`
+        const msg = `Delete ${what}? The notes go to the recycle bin for ${trashAPI.retentionDays} days.`
         const ok = await this._showModal({ type: 'confirm', title: 'DELETE FOLDER', message: msg })
         if (!ok) return
 
@@ -1268,7 +1557,7 @@ export class ThoughtCollector {
     _renderFiles() {
         this.currentFolder = foldersAPI.list().find((f) => f.id === this.currentFolder.id)
         if (!this.currentFolder) { this._navigate('folders'); return }
-        pushHash(this.currentFolder.path, null)
+        pushHash(this.currentFolder.path, null, { replace: this._restoring })
         this._paintFiles()
         this._warmFolder(this.currentFolder)
     }
@@ -1286,9 +1575,9 @@ export class ThoughtCollector {
                     <span class="folder-meta">${f.files.length} file${f.files.length !== 1 ? 's' : ''}</span>
                 </div>
                 <div class="folder-actions">
-                    <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="folder" title="Move">mv</button>
-                    <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename">rn</button>
-                    <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete">x</button>
+                    <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="folder" title="Move" aria-label="Move folder ${this._esc(f.name)}">mv</button>
+                    <button class="icon-btn rename-folder-btn" data-id="${f.id}" title="Rename" aria-label="Rename folder ${this._esc(f.name)}">rn</button>
+                    <button class="icon-btn delete-folder-btn" data-id="${f.id}" title="Delete" aria-label="Delete folder ${this._esc(f.name)}">x</button>
                 </div>
             </div>
         `).join('')
@@ -1301,9 +1590,9 @@ export class ThoughtCollector {
                     <span class="file-meta">${this._relTime(f.updated_at)}</span>
                 </div>
                 <div class="file-actions">
-                    <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="file" title="Move">mv</button>
-                    <button class="icon-btn rename-file-btn" data-id="${f.id}" title="Rename">rn</button>
-                    <button class="icon-btn delete-file-btn" data-id="${f.id}" title="Delete">x</button>
+                    <button class="icon-btn move-item-btn" data-id="${f.id}" data-type="file" title="Move" aria-label="Move note ${this._esc(f.title)}">mv</button>
+                    <button class="icon-btn rename-file-btn" data-id="${f.id}" title="Rename" aria-label="Rename note ${this._esc(f.title)}">rn</button>
+                    <button class="icon-btn delete-file-btn" data-id="${f.id}" title="Delete" aria-label="Delete note ${this._esc(f.title)}">x</button>
                 </div>
             </div>
         `).join('')
@@ -1443,36 +1732,12 @@ export class ThoughtCollector {
             })
         })
 
-        // Drag-and-drop
+        // Drag-and-drop. Subfolder cards live inside this list too, and the
+        // binding below already accepts a note dropped onto one. A second drop
+        // listener on those cards would run the move twice for a single drop,
+        // which splices a bystander note out of the folder and leaves the moved
+        // note listed twice in the destination.
         this._bindFolderDragDrop(fileList, folder.id)
-
-        // Allow dropping files onto folder cards to move them
-        this.container.querySelectorAll('.subfolder-card').forEach(card => {
-            card.addEventListener('dragover', (e) => {
-                // If dragging a file over a folder, allow drop
-                if (e.dataTransfer.types.includes('application/file-id')) {
-                    e.preventDefault()
-                    card.classList.add('drag-target-over')
-                }
-            })
-            card.addEventListener('dragleave', () => {
-                card.classList.remove('drag-target-over')
-            })
-            card.addEventListener('drop', async (e) => {
-                card.classList.remove('drag-target-over')
-                const fileId = e.dataTransfer.getData('application/file-id')
-                if (!fileId) return
-                e.preventDefault()
-                const targetFolderId = card.dataset.id
-                try {
-                    await filesAPI.move(folder.id, fileId, targetFolderId)
-                    this.currentFolder = foldersAPI.list().find(f => f.id === folder.id)
-                    this._render()
-                } catch (err) {
-                    this._toast(`Move error: ${err.message}`)
-                }
-            })
-        })
     }
 
     // ── .md file upload with progress ────────────────────────
@@ -1742,6 +2007,9 @@ export class ThoughtCollector {
             const searchInput = overlay.querySelector('.move-menu-search')
             const listEl = overlay.querySelector('.move-menu-list')
 
+            const cancel = () => { release(); overlay.remove(); resolve(undefined) }
+            const release = this._trapModal(overlay, () => cancel())
+
             searchInput.focus()
 
             searchInput.addEventListener('input', () => {
@@ -1754,19 +2022,17 @@ export class ThoughtCollector {
 
             overlay.querySelectorAll('.move-menu-item').forEach(btn => {
                 btn.addEventListener('click', () => {
+                    release()
                     overlay.remove()
                     const id = btn.dataset.id
                     resolve(id === '__root__' ? null : id)
                 })
             })
 
-            overlay.querySelector('.modal-cancel').addEventListener('click', () => {
-                overlay.remove()
-                resolve(undefined)
-            })
+            overlay.querySelector('.modal-cancel').addEventListener('click', cancel)
 
             overlay.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape') { overlay.remove(); resolve(undefined) }
+                if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel() }
             })
         })
     }
@@ -1864,7 +2130,11 @@ export class ThoughtCollector {
     async _deleteFile(fileId) {
         const file = this.currentFolder.files.find((f) => f.id === fileId)
         if (!file) return
-        const ok = await this._showModal({ type: 'confirm', title: 'DELETE FILE', message: `Delete "${file.title}"?` })
+        const ok = await this._showModal({
+            type: 'confirm',
+            title: 'DELETE NOTE',
+            message: `Delete "${file.title}"? It goes to the recycle bin for ${trashAPI.retentionDays} days.`,
+        })
         if (!ok) return
         filesAPI.delete(this.currentFolder.id, fileId)
             .then(() => {
@@ -1880,11 +2150,30 @@ export class ThoughtCollector {
     }
 
     // ── Open file ─────────────────────────────────────────────
-    _openFile(file) {
+    // Every route into the editor comes through here — the file list, the
+    // sidebar, the quick switcher, a wikilink, a backlink, a search hit, the
+    // graph. Each one replaces the editor's DOM, so the guard belongs here
+    // rather than at the call sites: only three of ten used to carry it, and
+    // the rest silently threw away whatever was unsaved.
+    async _openFile(file) {
+        if (this.editorDirty && this.currentFile && this.currentFile.id !== file.id) {
+            const keep = await this._showModal({
+                type: 'confirm',
+                title: 'UNSAVED CHANGES',
+                message: `Save "${this.currentFile.title}" before opening "${file.title}"?`,
+            })
+            if (keep) {
+                try { await this.flushSave() } catch { /* queued for retry */ }
+            }
+        }
+        // The autosave armed for the note we are leaving must not fire against
+        // the one we are opening.
+        clearTimeout(this._autosaveTimer)
+        clearTimeout(this._previewTimer)
         this.currentFile = file
         this.view = 'editor'
         this.editorDirty = false
-        pushHash(this.currentFolder.path, fileSlugOf(file))
+        pushHash(this.currentFolder.path, fileSlugOf(file), { replace: this._restoring })
         // Track in recent files
         this._addRecent(this.currentFolder.id, file.id, file.title)
 
@@ -1910,7 +2199,13 @@ export class ThoughtCollector {
         if (file.contentLoaded) {
             this._renderEditor()
             // Still revalidate against the cloud so edits from another device land.
-            filesAPI.loadContent(this.currentFolder.id, file.id, applyFresh).catch(() => {})
+            // The resolved record matters as much as the onFresh callback: when
+            // the body is fetched rather than served from cache, loadContent
+            // fills it in on the record and returns, without calling back — and
+            // the editor would keep showing whatever stale body it painted with.
+            filesAPI.loadContent(this.currentFolder.id, file.id, applyFresh)
+                .then(applyFresh)
+                .catch(() => {})
         } else {
             this.container.innerHTML = this._shell(this._loading('Loading file...'))
             this._bindShell()
@@ -1932,23 +2227,49 @@ export class ThoughtCollector {
                         this._toast('That note was deleted on another device and has been removed here.')
                         return
                     }
-                    // Never leave the editor stuck on "Loading file...". Fall back
-                    // to whatever content we have (empty for a new/unwritten file)
-                    // so the user can read and edit instead of staring at a spinner.
+                    // Never leave the editor stuck on "Loading file...", but do
+                    // not pretend the note is empty either. Marking the record
+                    // loaded with a blank body outlives the session — it is
+                    // written to local meta — and the next save or move would
+                    // then copy that blank over the real note in the cloud.
                     if (this.view === 'editor' && this.currentFile.id === file.id) {
-                        this.currentFile.content = this.currentFile.content || ''
-                        this.currentFile.contentLoaded = true
-                        this._renderEditor()
+                        this._renderLoadFailed(file, err)
                     }
                     this._toast(`Load error: ${err.message}`)
                 })
         }
     }
 
+    // ── Note we couldn't read ─────────────────────────────────
+    // Shown instead of the editor when the body never arrived. There is no
+    // textarea here on purpose: an editor primed with a blank body invites the
+    // user to type into it, and the save that follows replaces the note in the
+    // cloud with what they typed.
+    _renderLoadFailed(file, err) {
+        const detail = err && err.message ? err.message : 'The note could not be read.'
+        const body = `
+            <div class="empty-state">
+                <p class="empty-headline">Couldn't load this note</p>
+                <p class="empty-sub">${this._esc(detail)} — nothing has been changed.</p>
+                <button class="cyber-btn compact-btn" id="retry-load-btn" style="margin-top:1rem;">
+                    <span class="btn-text">Retry</span><span class="btn-glow"></span>
+                </button>
+            </div>
+        `
+        this.container.innerHTML = this._shell(body)
+        this._bindShell()
+        const retryBtn = this.container.querySelector('#retry-load-btn')
+        if (retryBtn) retryBtn.addEventListener('click', () => this._openFile(file))
+    }
+
     // ── Editor view ───────────────────────────────────────────
     _renderEditor() {
         const file = this.currentFile
         const folder = this.currentFolder
+        // Any repaint of the editor — a move elsewhere in the tree, a settings
+        // change — must honour the same rule as the first one: without a body
+        // we know to be the note's own, there is nothing safe to edit.
+        if (!file.contentLoaded) { this._renderLoadFailed(file); return }
         const mode = this._isMobile() ? 'edit' : this.editorMode
         const autosaveChecked = this.autosave ? 'checked' : ''
 
@@ -1974,7 +2295,6 @@ export class ThoughtCollector {
                         type="text"
                         id="file-title"
                         class="cyber-input title-input"
-                        value="${this._esc(file.title)}"
                         placeholder="File title..."
                         aria-label="File title"
                         maxlength="200"
@@ -2124,7 +2444,17 @@ export class ThoughtCollector {
         const outlineBtn = this.container.querySelector('#outline-btn')
         const backlinksBtn = this.container.querySelector('#backlinks-btn')
 
-        contentArea.value = file.content || ''
+        // Assigned rather than written into the markup: a title containing a
+        // quote would come back truncated at that quote, and the next save
+        // writes the truncation back as the note's real name.
+        titleInput.value = file.title || ''
+        // A re-render triggered from inside the editor (a new folder, an
+        // import, a sidebar drop) rebuilds this textarea. Repainting it from
+        // the last SAVED body would silently revert whatever is unsaved, so
+        // carry the live text across instead.
+        const carried = this.editorDirty && this._liveBody != null ? this._liveBody : null
+        contentArea.value = carried != null ? carried : (file.content || '')
+        this._liveBody = null
         this._renderPreview(preview, contentArea.value)
 
         // Autosave toggle
@@ -2177,7 +2507,7 @@ export class ThoughtCollector {
                     if (!ok) return
                 }
                 this.editorDirty = false
-                this._navigate('files')
+                this._navigate('files', { replace: true })
             })
         }
 
@@ -2224,19 +2554,37 @@ export class ThoughtCollector {
         // Fixed calc(100dvh - …) fights the dynamic URL bar + software keyboard.
         if (this._isMobile() && window.visualViewport && editorZone) {
             const vv = window.visualViewport
+            // The keyboard is measured against the tallest viewport seen while
+            // no field was focused. Comparing against window.innerHeight cannot
+            // work: the page asks for interactive-widget=resizes-content, so the
+            // layout viewport shrinks with the keyboard too and the two heights
+            // stay equal — the keyboard would look permanently shut, and the
+            // rules that fold away the header and title to make room never fire.
+            let baseline = vv.height
             const adjust = () => {
-                const keyboardOpen = window.innerHeight - vv.height > 120
+                const focused = document.activeElement
+                if (!focused || (focused.tagName !== 'INPUT' && focused.tagName !== 'TEXTAREA')) {
+                    baseline = Math.max(baseline, vv.height)
+                }
+                const keyboardOpen = baseline - vv.height > 120
                 editorZone.classList.toggle('keyboard-open', keyboardOpen)
                 // The keyboard state can hide surrounding chrome; measure only
                 // after that layout change so the canvas receives every free px.
-                const top = editorZone.getBoundingClientRect().top
+                // getBoundingClientRect is in layout-viewport coordinates, so
+                // subtract however far iOS has scrolled the visual viewport
+                // inside it — otherwise the zone is sized that much too short
+                // and its bottom edge floats above the keyboard.
+                const top = editorZone.getBoundingClientRect().top - vv.offsetTop
                 editorZone.style.height = Math.max(200, vv.height - top) + 'px'
             }
+            const onOrientation = () => { baseline = vv.height }
             vv.addEventListener('resize', adjust)
             vv.addEventListener('scroll', adjust)
+            window.addEventListener('orientationchange', onOrientation)
             this._vvCleanup = () => {
                 vv.removeEventListener('resize', adjust)
                 vv.removeEventListener('scroll', adjust)
+                window.removeEventListener('orientationchange', onOrientation)
                 editorZone.classList.remove('keyboard-open')
             }
             adjust()
@@ -2281,13 +2629,15 @@ export class ThoughtCollector {
             saveStatus.className = 'save-status unsaved'
         }
 
-        let previewTimer = null
         titleInput.addEventListener('input', markDirty)
         contentArea.addEventListener('input', () => {
             markDirty()
             updateStats()
-            clearTimeout(previewTimer)
-            previewTimer = setTimeout(() => this._renderPreview(preview, contentArea.value), 100)
+            clearTimeout(this._previewTimer)
+            this._previewTimer = setTimeout(() => {
+                this._renderPreview(preview, contentArea.value)
+                if (this._outlineOpen) this._updateOutlinePanel()
+            }, 100)
             // Schedule autosave
             if (this.autosave) {
                 clearTimeout(this._autosaveTimer)
@@ -2306,8 +2656,12 @@ export class ThoughtCollector {
         })
 
         const doSave = () => {
-            if (this._saving) return  // prevent concurrent saves
+            // A save requested while one is in flight used to be dropped on the
+            // floor. Remember it and run it when the current one lands, or the
+            // keystrokes typed during a slow save were never written.
+            if (this._saving) { this._saveAgain = true; return }
             this._saving = true
+            this._saveAgain = false
             saveBtn.disabled = true
             saveBtn.querySelector('.btn-text').textContent = 'Saving...'
             saveStatus.textContent = 'saving...'
@@ -2316,16 +2670,29 @@ export class ThoughtCollector {
             // Show saving overlay to prevent accidental navigation
             this._showSavingOverlay()
 
+            // Snapshot what we are actually writing. Anything typed after this
+            // point is still unsaved, so the dirty flag must survive.
+            const sentContent = contentArea.value
+            const sentTitle = titleInput.value
+            const sentFileId = file.id
+
             filesAPI.update(folder.id, file.id, {
-                title: titleInput.value,
-                content: contentArea.value,
+                title: sentTitle,
+                content: sentContent,
             })
                 .then(updated => {
+                    // The user may have navigated away while this was in flight.
+                    // Adopting the result then pointed this.currentFile at the
+                    // note they had just left.
+                    const stillHere = this.view === 'editor' && this.currentFile?.id === sentFileId
+                    if (!stillHere) return
                     this.currentFile = updated
-                    this.editorDirty = false
-                    saveStatus.textContent = 'saved'
-                    saveStatus.className = 'save-status saved'
-                    setTimeout(() => { if (!this.editorDirty) saveStatus.textContent = '' }, 2000)
+                    if (contentArea.value === sentContent && titleInput.value === sentTitle) {
+                        this.editorDirty = false
+                        saveStatus.textContent = 'saved'
+                        saveStatus.className = 'save-status saved'
+                        setTimeout(() => { if (!this.editorDirty) saveStatus.textContent = '' }, 2000)
+                    }
                 })
                 .catch(err => this._toast(`Save error: ${err.message}`))
                 .finally(() => {
@@ -2333,6 +2700,10 @@ export class ThoughtCollector {
                     saveBtn.disabled = false
                     saveBtn.querySelector('.btn-text').textContent = 'Save'
                     this._hideSavingOverlay()
+                    if (this._saveAgain && this.view === 'editor' && this.currentFile?.id === sentFileId) {
+                        this._saveAgain = false
+                        doSave()
+                    }
                 })
         }
 
@@ -2412,24 +2783,15 @@ export class ThoughtCollector {
                 if (!selected) placeholderRange = [2, 15]
                 break
             case 'h1':
-                replacement = this._prependLine('# ', start, val, selected)
-                textarea.value = replacement.val
-                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
-                textarea.dispatchEvent(new Event('input'))
+                this._prependLine(textarea, '# ')
                 textarea.focus()
                 return
             case 'h2':
-                replacement = this._prependLine('## ', start, val, selected)
-                textarea.value = replacement.val
-                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
-                textarea.dispatchEvent(new Event('input'))
+                this._prependLine(textarea, '## ')
                 textarea.focus()
                 return
             case 'h3':
-                replacement = this._prependLine('### ', start, val, selected)
-                textarea.value = replacement.val
-                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
-                textarea.dispatchEvent(new Event('input'))
+                this._prependLine(textarea, '### ')
                 textarea.focus()
                 return
             case 'code':
@@ -2443,10 +2805,7 @@ export class ThoughtCollector {
                 if (!selected) placeholderRange = [5, 14]
                 break
             case 'quote':
-                replacement = this._prependLine('> ', start, val, selected)
-                textarea.value = replacement.val
-                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
-                textarea.dispatchEvent(new Event('input'))
+                this._prependLine(textarea, '> ')
                 textarea.focus()
                 return
             case 'ul':
@@ -2494,10 +2853,7 @@ export class ThoughtCollector {
                 if (!selected) placeholderRange = [1, 4]
                 break
             case 'callout':
-                replacement = this._prependLine('> [!note] ', start, val, selected)
-                textarea.value = replacement.val
-                textarea.setSelectionRange(replacement.cursor, replacement.cursor)
-                textarea.dispatchEvent(new Event('input'))
+                this._prependLine(textarea, '> [!note] ')
                 textarea.focus()
                 return
             case 'highlight':
@@ -2514,38 +2870,34 @@ export class ThoughtCollector {
                 return
         }
 
-        textarea.value = val.slice(0, start) + replacement + val.slice(end)
-        if (placeholderRange) {
-            textarea.setSelectionRange(start + placeholderRange[0], start + placeholderRange[1])
-        } else {
-            textarea.setSelectionRange(start + cursorOffset, start + cursorOffset)
-        }
-        textarea.dispatchEvent(new Event('input'))
+        const selStart = placeholderRange ? start + placeholderRange[0] : start + cursorOffset
+        const selEnd = placeholderRange ? start + placeholderRange[1] : selStart
+        this._applyEdit(textarea, start, end, replacement, selStart, selEnd)
         textarea.focus()
     }
 
-    _prependLine(prefix, cursorPos, val, selected) {
-        const lineStart = val.lastIndexOf('\n', cursorPos - 1) + 1
-        const lineEnd = val.indexOf('\n', cursorPos)
-        const endIdx = lineEnd === -1 ? val.length : lineEnd
+    // Toggle a line prefix (heading, quote, callout) on the caret's line.
+    // Applied through _applyEdit so the change stays on the native undo stack.
+    _prependLine(textarea, prefix) {
+        const val = textarea.value
+        const cursorPos = textarea.selectionStart
+        const { lineStart, lineEnd: endIdx } = this._lineBounds(val, cursorPos)
         const currentLine = val.slice(lineStart, endIdx)
 
         // Preserve any leading indentation; operate on the content after it.
-        const indentMatch = currentLine.match(/^[ \t]*/)
-        const indent = indentMatch[0]
-        const body = currentLine.slice(indent.length)
+        const { indent, rest: body } = this._splitIndent(currentLine)
 
         // If line already has the prefix (after indent), remove it (toggle off).
         if (body.startsWith(prefix)) {
-            const newVal = val.slice(0, lineStart) + indent + body.slice(prefix.length) + val.slice(endIdx)
-            return { val: newVal, cursor: cursorPos - prefix.length }
+            this._applyEdit(textarea, lineStart, endIdx, indent + body.slice(prefix.length),
+                Math.max(lineStart, cursorPos - prefix.length))
+            return
         }
 
         // Strip any existing heading/list/quote prefix before adding the new one.
-        const stripped = body.replace(/^(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|- \[[ xX]\]\s+|>\s+)/, '')
+        const stripped = body.replace(/^(#{1,6}\s+|- \[[ xX]\]\s+|[-*+]\s+|\d+[.)]\s+|>\s+)/, '')
         const newLine = indent + prefix + stripped
-        const newVal = val.slice(0, lineStart) + newLine + val.slice(endIdx)
-        return { val: newVal, cursor: lineStart + newLine.length }
+        this._applyEdit(textarea, lineStart, endIdx, newLine, lineStart + newLine.length)
     }
 
     // ── Format keyboard shortcuts (Cmd/Ctrl+B, I, K) ──────────
@@ -2622,41 +2974,57 @@ export class ThoughtCollector {
             findCount.textContent = matches.length > 0 ? `${currentMatch + 1}/${matches.length}` : '0/0'
         }
 
-        const highlightMatch = () => {
+        // `focusEditor` is false while the user is typing in the find box.
+        // Calling textarea.focus() on every keystroke used to yank the caret
+        // back into the note, so the second character of a search term — and
+        // every one after it — was typed into the note instead of the box.
+        const highlightMatch = (focusEditor = false) => {
             if (currentMatch < 0 || currentMatch >= matches.length) return
             const pos = matches[currentMatch]
             const len = findInput.value.length
-            textarea.focus()
             textarea.setSelectionRange(pos, pos + len)
-            // Scroll into view
-            const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
-            const textBefore = textarea.value.slice(0, pos)
-            const lineNum = textBefore.split('\n').length - 1
-            textarea.scrollTop = lineNum * lineHeight - textarea.clientHeight / 2
+            this._scrollTextareaTo(textarea, pos)
+            if (focusEditor) textarea.focus()
             findCount.textContent = `${currentMatch + 1}/${matches.length}`
         }
 
-        // Open find bar with Cmd/Ctrl+F
+        // Open find bar with Cmd/Ctrl+F. Bound on the editor zone rather than
+        // the textarea: with focus in the preview, the title field or on a
+        // button, Cmd+F fell through to the browser's own find bar, which can't
+        // see past the visible viewport of the note.
         const openFind = (e) => {
-            if (e.key === 'f' && (e.metaKey || e.ctrlKey)) {
+            if (e.key === 'f' && (e.metaKey || e.ctrlKey) && !e.altKey) {
                 e.preventDefault()
                 bar.classList.remove('hidden')
-                findInput.focus()
                 const sel = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd)
-                if (sel) { findInput.value = sel; doFind() }
+                if (sel && !sel.includes('\n')) findInput.value = sel
+                findInput.focus()
+                findInput.select()
+                if (findInput.value) doFind()
             }
         }
-        textarea.addEventListener('keydown', openFind)
+        const editorZoneEl = this.container.querySelector('#editor-zone') || this.container
+        editorZoneEl.addEventListener('keydown', openFind)
 
         findInput.addEventListener('input', doFind)
         findInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault()
+                if (!matches.length) return
                 if (e.shiftKey) { currentMatch = (currentMatch - 1 + matches.length) % matches.length }
                 else { currentMatch = (currentMatch + 1) % matches.length }
                 highlightMatch()
             }
-            if (e.key === 'Escape') { bar.classList.add('hidden'); textarea.focus() }
+        })
+
+        // Escape must close the bar from anywhere inside it — the replace field
+        // and the nav buttons are focusable too, and left unhandled the key
+        // reached the document handler and closed the whole note instead.
+        bar.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') return
+            e.stopPropagation()
+            bar.classList.add('hidden')
+            textarea.focus()
         })
 
         this.container.querySelector('#find-prev').addEventListener('click', () => {
@@ -2681,13 +3049,26 @@ export class ThoughtCollector {
         this.container.querySelector('#replace-one').addEventListener('click', () => {
             if (currentMatch < 0 || !matches.length) return
             const pos = matches[currentMatch]
-            const len = findInput.value.length
-            const rep = replaceInput.value
-            textarea.value = textarea.value.slice(0, pos) + rep + textarea.value.slice(pos + len)
-            textarea.dispatchEvent(new Event('input'))
+            const query = findInput.value
+            if (!query) return
+            // The note may have changed since the last search. Replacing a stale
+            // offset would overwrite whatever now sits there, so re-check first.
+            if (textarea.value.substr(pos, query.length).toLowerCase() !== query.toLowerCase()) {
+                doFind()
+                return
+            }
+            const wasAt = currentMatch
+            this._applyEdit(textarea, pos, pos + query.length, replaceInput.value,
+                pos + replaceInput.value.length)
             markDirty()
             this._renderPreview(preview, textarea.value)
             doFind()
+            // doFind restarts at the first match; stay where the user was, on
+            // the hit that has taken the replaced one's place.
+            if (matches.length) {
+                currentMatch = Math.min(wasAt, matches.length - 1)
+                highlightMatch()
+            }
         })
         this.container.querySelector('#replace-all').addEventListener('click', () => {
             if (!findInput.value) return
@@ -2695,8 +3076,12 @@ export class ThoughtCollector {
             const rep = replaceInput.value
             // Case-insensitive replace all
             const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
-            textarea.value = textarea.value.replace(regex, rep)
-            textarea.dispatchEvent(new Event('input'))
+            // Replace via a function: as a pattern string, "$&" / "$1" / "$`" in
+            // the user's replacement text would be expanded instead of inserted.
+            const next = textarea.value.replace(regex, () => rep)
+            if (next === textarea.value) return
+            const caret = Math.min(textarea.selectionStart, next.length)
+            this._applyEdit(textarea, 0, textarea.value.length, next, caret)
             markDirty()
             this._renderPreview(preview, textarea.value)
             doFind()
@@ -2761,10 +3146,11 @@ export class ThoughtCollector {
             </div>
         `
         document.body.appendChild(overlay)
-        const close = () => overlay.remove()
+        const close = () => { release(); overlay.remove() }
+        const release = this._trapModal(overlay, () => close())
         overlay.querySelector('.modal-confirm').addEventListener('click', close)
         overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
-        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close() })
+        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close() } })
         overlay.setAttribute('tabindex', '-1')
         overlay.focus()
     }
@@ -2834,7 +3220,7 @@ export class ThoughtCollector {
 
         themeSel.addEventListener('change', () => {
             this._applyTheme(themeSel.value)
-            this._render()
+            this._syncThemePicker(themeSel.value)
         })
 
         editorSel.addEventListener('change', () => {
@@ -2869,10 +3255,11 @@ export class ThoughtCollector {
             if (this.autologout) this._applyAutologout()
         })
 
-        const close = () => overlay.remove()
+        const close = () => { release(); overlay.remove() }
+        const release = this._trapModal(overlay, () => close())
         overlay.querySelector('.modal-confirm').addEventListener('click', close)
         overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
-        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close() })
+        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close() } })
         overlay.setAttribute('tabindex', '-1')
         overlay.focus()
     }
@@ -2917,7 +3304,7 @@ export class ThoughtCollector {
         const close = () => overlay.remove()
         overlay.querySelector('.modal-cancel').addEventListener('click', close)
         overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
-        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') close() })
+        overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close() } })
 
         overlay.querySelectorAll('.heading-item').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -2926,8 +3313,7 @@ export class ThoughtCollector {
                 for (let i = 0; i < h.lineIndex; i++) pos += lines[i].length + 1
                 textarea.focus()
                 textarea.setSelectionRange(pos, pos)
-                const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
-                textarea.scrollTop = h.lineIndex * lineHeight - textarea.clientHeight / 3
+                this._scrollTextareaTo(textarea, pos)
                 close()
             })
         })
@@ -2945,6 +3331,165 @@ export class ThoughtCollector {
         const nl = val.indexOf('\n', pos)
         const lineEnd = nl === -1 ? val.length : nl
         return { lineStart, lineEnd }
+    }
+
+    // Scroll a textarea so the character at `pos` sits mid-viewport.
+    // Measured with a mirror element rather than counting "\n" times a line
+    // height: in a soft-wrapped note one logical line can occupy many visual
+    // rows, so the arithmetic version landed further off the more the note
+    // wrapped — which is why jumping to a search hit showed the wrong place.
+    _scrollTextareaTo(textarea, pos) {
+        let mirror = this._scrollMirror
+        if (!mirror) {
+            mirror = document.createElement('div')
+            mirror.setAttribute('aria-hidden', 'true')
+            mirror.style.cssText =
+                'position:absolute;visibility:hidden;pointer-events:none;' +
+                'left:-9999px;top:0;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:break-word;'
+            document.body.appendChild(mirror)
+            this._scrollMirror = mirror
+        }
+        const cs = getComputedStyle(textarea)
+        for (const prop of ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing',
+            'lineHeight', 'textTransform', 'textIndent', 'paddingTop', 'paddingRight',
+            'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth',
+            'borderBottomWidth', 'borderLeftWidth', 'boxSizing', 'tabSize', 'wordSpacing']) {
+            mirror.style[prop] = cs[prop]
+        }
+        mirror.style.width = cs.width
+        // A trailing newline collapses without something after it to hold the box open.
+        mirror.textContent = textarea.value.slice(0, pos) || ''
+        const marker = document.createElement('span')
+        marker.textContent = '\u200b'
+        mirror.appendChild(marker)
+        const offset = marker.offsetTop
+        const target = offset - textarea.clientHeight / 2
+        textarea.scrollTop = Math.max(0, Math.min(target, textarea.scrollHeight - textarea.clientHeight))
+    }
+
+    // ── The one way this file is allowed to edit the textarea ──────
+    // Assigning `textarea.value` directly wipes the browser's native undo
+    // stack, so after any list operation Cmd+Z could no longer step back —
+    // it jumped past every edit at once and could blank the whole note.
+    // Routing edits through execCommand('insertText') keeps them on the undo
+    // stack, keeps the caret and scroll stable, and fires `input` natively.
+    // Returns true when the undoable path was used.
+    _applyEdit(textarea, from, to, text, selStart = null, selEnd = null) {
+        const before = textarea.value
+        const expected = before.slice(0, from) + text + before.slice(to)
+        const scrollTop = textarea.scrollTop
+        if (document.activeElement !== textarea) textarea.focus({ preventScroll: true })
+        textarea.setSelectionRange(from, to)
+
+        let undoable = false
+        try {
+            undoable = (text === '' && to > from)
+                ? document.execCommand('delete')
+                : document.execCommand('insertText', false, text)
+        } catch { undoable = false }
+
+        // Trust the result, not the return value: execCommand can report success
+        // and leave the field untouched. If the text isn't what we asked for,
+        // fall back to a direct write — a lost undo step beats a lost edit.
+        if (textarea.value !== expected) {
+            undoable = false
+            textarea.value = expected
+            textarea.scrollTop = scrollTop
+        }
+
+        const s = Math.max(0, Math.min(selStart == null ? from + text.length : selStart, expected.length))
+        const e = Math.max(s, Math.min(selEnd == null ? s : selEnd, expected.length))
+        textarea.setSelectionRange(s, e)
+        // On the undoable path the browser has already kept the caret in view;
+        // forcing the old scrollTop back would hide it while typing at the
+        // bottom edge of the pane.
+        // execCommand already emitted `input`; only synthesise one for the fallback.
+        if (!undoable) textarea.dispatchEvent(new Event('input', { bubbles: true }))
+        return undoable
+    }
+
+    // Replace whole lines [fromLine, toLine] of `textarea` with `newLines`,
+    // as one undoable edit. Returns the char offset the replaced block starts at.
+    _replaceLines(textarea, lines, fromLine, toLine, newLines, selStart, selEnd) {
+        let from = 0
+        for (let i = 0; i < fromLine; i++) from += lines[i].length + 1
+        let to = from
+        for (let i = fromLine; i <= toLine; i++) to += lines[i].length + (i < toLine ? 1 : 0)
+        this._applyEdit(textarea, from, to, newLines.join('\n'), selStart, selEnd)
+        return from
+    }
+
+    // Rewrite the textarea into `next` with the smallest edit that does it, so
+    // the undo entry covers only the text that actually moved.
+    _applyDiff(textarea, next, caret) {
+        const val = textarea.value
+        if (val === next) {
+            textarea.setSelectionRange(caret, caret)
+            return
+        }
+        let p = 0
+        const max = Math.min(val.length, next.length)
+        while (p < max && val[p] === next[p]) p++
+        let q = 0
+        while (q < max - p && val[val.length - 1 - q] === next[next.length - 1 - q]) q++
+        this._applyEdit(textarea, p, val.length - q, next.slice(p, next.length - q), caret, caret)
+    }
+
+    // Where a caret sitting in `before` lands in `after`, given the two differ
+    // only in the markers at the head of some lines — which is all renumbering
+    // ever changes.
+    _shiftCaret(before, after, caret) {
+        const b = before.split('\n')
+        const a = after.split('\n')
+        if (a.length !== b.length) return Math.min(caret, after.length)
+        let i = 0, acc = 0
+        while (i < b.length - 1 && acc + b[i].length < caret) { acc += b[i].length + 1; i++ }
+        const col = caret - acc
+        let base = 0
+        for (let k = 0; k < i; k++) base += a[k].length + 1
+        const shifted = col === 0 ? 0 : col + (a[i].length - b[i].length)
+        return base + Math.max(0, Math.min(shifted, a[i].length))
+    }
+
+    // Apply a structural list edit together with the renumbering it forces, as a
+    // SINGLE undoable step. `ops` are renumber requests ({ at, following }) run
+    // against the text as it will be after the edit. Emitting the renumber
+    // separately put a second entry on the browser's undo stack, so one Cmd+Z
+    // rolled back only the numbers and left the list holding a duplicate marker.
+    _applyListEdit(textarea, from, to, text, caret, ops = null) {
+        const val = textarea.value
+        let next = val.slice(0, from) + text + val.slice(to)
+        let pos = caret
+        for (const op of ops || []) {
+            if (!op) continue
+            const renumbered = this._renumberedText(next, op.at, !!op.following)
+            if (renumbered === null) continue
+            pos = this._shiftCaret(next, renumbered, pos)
+            next = renumbered
+        }
+        this._applyDiff(textarea, next, pos)
+    }
+
+    // Parse a list item line into its parts, or null when it isn't one.
+    // Accepts "- ", "* ", "+ ", "1. ", "1) " with an optional "[ ] " task box.
+    _parseListLine(line) {
+        const m = line.match(/^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)(\[[ xX]\][ \t]+)?/)
+        if (!m) return null
+        // A thematic break is not a list item. CommonMark allows spaces between
+        // the characters, so "* * *" and "- - -" count as well — without this
+        // they parsed as a bullet whose text is another bullet.
+        const bare = line.trim()
+        if (/^([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(bare)) return null
+        return {
+            indent: m[1],
+            bullet: m[2],
+            gap: m[3],
+            task: m[4] || '',
+            prefix: m[0],
+            prefixLen: m[0].length,
+            content: line.slice(m[0].length),
+            ordered: /^\d/.test(m[2]),
+        }
     }
 
     _splitIndent(line) {
@@ -2981,6 +3526,20 @@ export class ThoughtCollector {
         return '\t' + indent
     }
 
+    // Take `cols` visual columns off the head of an indent string, leaving the
+    // rest of it as it was. Outdenting a subtree has to move every line by the
+    // same amount: deriving the step per line collapses a list indented in
+    // 2-space steps, where a grandchild's 4 spaces read as one 4-column step.
+    _removeIndentCols(indent, cols) {
+        if (cols <= 0) return indent
+        let col = 0, i = 0
+        for (; i < indent.length && col < cols; i++) {
+            col += indent[i] === '\t' ? 4 - (col % 4) : 1
+        }
+        // A tab straddling the cut leaves its remainder behind as spaces.
+        return ' '.repeat(Math.max(0, col - cols)) + indent.slice(i)
+    }
+
     // Mark each line that is inside a fenced code block (``` or ~~~), so indent
     // normalization / multi-line indent never touches code.
     _fenceMask(lines) {
@@ -3002,6 +3561,15 @@ export class ThoughtCollector {
         return mask
     }
 
+    // True when the line starting at `lineStart` sits inside a fenced code block.
+    // The Enter/Backspace/Tab handling has to ask: inside a fence, "1. step" and
+    // "> x" are code the user typed, not structure to continue or resequence.
+    _caretInFence(val, lineStart) {
+        const lines = val.split('\n')
+        const mask = this._fenceMask(lines)
+        return !!mask[val.slice(0, lineStart).split('\n').length - 1]
+    }
+
     // Measure leading indentation in visual columns; returns where content starts.
     _measureCols(line, tabSize = 4) {
         let col = 0, idx = 0
@@ -3014,10 +3582,44 @@ export class ThoughtCollector {
         return { cols: col, idx, rest: line.slice(idx) }
     }
 
+    // True when the list item at `lineStart` may legally be nested one level
+    // deeper — i.e. it has a preceding sibling at its own level (or shallower)
+    // in the same list to become a child of. Markdown has no way to express a
+    // first item that is already indented, so allowing it produced a list the
+    // renderer flattened, which is why nested bullets looked disconnected.
+    _canIndentListLine(val, lineStart) {
+        const { lineEnd } = this._lineBounds(val, lineStart)
+        const level = this._indentLevels(this._splitIndent(val.slice(lineStart, lineEnd)).indent)
+        let p = lineStart
+        let blanks = 0
+        while (p > 0) {
+            const prevEnd = p - 1
+            const prevStart = val.lastIndexOf('\n', prevEnd - 1) + 1
+            const line = val.slice(prevStart, prevEnd)
+            p = prevStart
+            // A blank line makes a list "loose", it does not end it. Treating it
+            // as a terminator meant Tab silently did nothing on every list with
+            // spacing between its items.
+            if (line.trim() === '') {
+                if (++blanks > 2) return false
+                continue
+            }
+            const lvl = this._indentLevels(this._splitIndent(line).indent)
+            if (lvl > level) { blanks = 0; continue }     // a deeper cousin — keep looking
+            if (!this._parseListLine(line)) return false  // prose above, not a list
+            return lvl === level                          // sibling → may become its child
+        }
+        return false                                       // first line of the note
+    }
+
     // Range of a list item's whole subtree (itself + deeper descendants + interleaved blanks).
     _subtreeRange(val, lineStart) {
         const { lineEnd } = this._lineBounds(val, lineStart)
-        const baseLevel = this._indentLevels(this._splitIndent(val.slice(lineStart, lineEnd)).indent)
+        // Compare raw indent columns rather than rounded levels: a 2-space list
+        // (what most Markdown tools emit) nests its child at column 4, which
+        // rounds to the same level as its parent at column 2 — the subtree then
+        // ended at the parent and Tab moved an item away from its own children.
+        const baseCol = this._indentWidth(this._splitIndent(val.slice(lineStart, lineEnd)).indent)
         let endLine = lineEnd
         let p = lineEnd
         while (p < val.length) {
@@ -3027,53 +3629,68 @@ export class ThoughtCollector {
             const ne = nlPos === -1 ? val.length : nlPos
             const ln = val.slice(ns, ne)
             if (ln.trim() === '') { endLine = ne; p = ne; continue }
-            const lvl = this._indentLevels(this._splitIndent(ln).indent)
-            if (lvl <= baseLevel) break
+            const col = this._indentWidth(this._splitIndent(ln).indent)
+            if (col <= baseCol) break
             endLine = ne; p = ne
         }
         return { start: lineStart, end: endLine }
     }
 
-    // Renumber the contiguous ordered-list run containing the line at `anyLineStart`,
-    // keeping numbers sequential. Children (deeper lines) are transparent; blanks /
-    // shallower / same-level-non-ordered lines end the run. Caret is preserved.
-    _renumberRun(textarea, anyLineStart) {
-        const val = textarea.value
+    // Renumber the contiguous ordered-list run containing the line at `offset`
+    // (or, with `following`, the first run at or after it), keeping numbers
+    // sequential. Children (deeper lines) are transparent; blanks, shallower
+    // lines, same-level non-ordered items and fenced code end the run.
+    //
+    // Pure — it takes and returns text, and answers null when the numbers are
+    // already right. Keeping the arithmetic away from the textarea is what lets
+    // a structural edit and the renumbering it forces be applied as one step.
+    _renumberedText(val, offset, following = false) {
         const lines = val.split('\n')
-        // Map char offset -> line index for anyLineStart
-        let editedIdx = 0, acc = 0
+        const mask = this._fenceMask(lines)
+        // Map char offset -> line index. An offset past the end means there is
+        // no run to resequence; falling through with idx still 0 rewrote the
+        // numbering at the TOP of the note, which the user never touched.
+        if (offset > val.length) return null
+        let idx = -1, acc = 0
         for (let i = 0; i < lines.length; i++) {
-            if (acc === anyLineStart) { editedIdx = i; break }
+            if (acc === offset) { idx = i; break }
             acc += lines[i].length + 1
-            if (acc > anyLineStart) { editedIdx = i; break }
+            if (acc > offset) { idx = i; break }
         }
+        if (idx === -1) return null
         const ordRe = /^([ \t]*)(\d+)([.)])(\s+)/
-        const editM = lines[editedIdx] && lines[editedIdx].match(ordRe)
-        if (!editM) return
-        const runLevel = this._indentLevels(editM[1])
+        if (following) {
+            // An item that was just deleted or demoted leaves blank lines behind;
+            // step over them to the run that now starts there.
+            while (idx < lines.length && !mask[idx] && lines[idx].trim() === '') idx++
+        }
+        if (idx >= lines.length || mask[idx]) return null
+        const editM = lines[idx].match(ordRe)
+        if (!editM) return null
+        const runCol = this._indentWidth(editM[1])
 
         // Walk up to the run start. A run is bounded by a blank line, a shallower
         // level, or a same-level non-ordered item; deeper children are transparent.
-        let s = editedIdx
+        let s = idx
         let hasOrderedAbove = false
-        for (let i = editedIdx - 1; i >= 0; i--) {
+        for (let i = idx - 1; i >= 0; i--) {
             const ln = lines[i]
-            if (ln.trim() === '') break
-            const lvl = this._indentLevels(this._splitIndent(ln).indent)
-            if (lvl > runLevel) continue // deeper child, skip
-            if (lvl < runLevel) break
+            if (mask[i] || ln.trim() === '') break
+            const col = this._indentWidth(this._splitIndent(ln).indent)
+            if (col > runCol) continue // deeper child, skip
+            if (col < runCol) break
             if (!ordRe.test(ln)) break
             s = i
             hasOrderedAbove = true
         }
         // Walk down to the run end
-        let eLine = editedIdx
-        for (let i = editedIdx + 1; i < lines.length; i++) {
+        let eLine = idx
+        for (let i = idx + 1; i < lines.length; i++) {
             const ln = lines[i]
-            if (ln.trim() === '') break
-            const lvl = this._indentLevels(this._splitIndent(ln).indent)
-            if (lvl > runLevel) continue // deeper child, skip
-            if (lvl < runLevel) break
+            if (mask[i] || ln.trim() === '') break
+            const col = this._indentWidth(this._splitIndent(ln).indent)
+            if (col > runCol) continue // deeper child, skip
+            if (col < runCol) break
             if (!ordRe.test(ln)) break
             eLine = i
         }
@@ -3081,23 +3698,38 @@ export class ThoughtCollector {
         const startM = lines[s].match(ordRe)
         // A run with no ordered sibling above it is a fresh (possibly nested) list →
         // restart at 1, matching Obsidian. Otherwise keep the existing start number.
-        let num = hasOrderedAbove ? parseInt(startM[2], 10) : 1
-        let caretDelta = 0
+        // Keep whatever number the run actually starts with. Restarting at 1
+        // rewrote a deliberately-numbered list ("1999. a year", a list resumed
+        // at 5.) the moment anything in it was edited.
+        let num = parseInt(startM[2], 10)
+        if (!Number.isFinite(num)) num = 1
+        let changed = false
         for (let i = s; i <= eLine; i++) {
             const mm = lines[i].match(ordRe)
-            if (!mm) continue // a deeper child line, leave untouched
-            const lvl = this._indentLevels(mm[1])
-            if (lvl !== runLevel) continue
-            const oldLen = lines[i].length
+            if (!mm) continue                                        // a deeper child line
+            if (this._indentWidth(mm[1]) !== runCol) continue
             const newLine = mm[1] + num + mm[3] + mm[4] + lines[i].slice(mm[0].length)
-            if (i < editedIdx) caretDelta += newLine.length - oldLen
-            lines[i] = newLine
+            if (newLine !== lines[i]) { lines[i] = newLine; changed = true }
             num++
         }
-        const start = textarea.selectionStart
-        textarea.value = lines.join('\n')
-        const np = start + caretDelta
-        textarea.setSelectionRange(np, np)
+        // Already sequential — don't burn an undo step rewriting identical text.
+        if (!changed) return null
+        return lines.join('\n')
+    }
+
+    // Renumber the run containing `anyLineStart` as an edit of its own.
+    _renumberRun(textarea, anyLineStart) {
+        const next = this._renumberedText(textarea.value, anyLineStart)
+        if (next === null) return
+        this._applyDiff(textarea, next, this._shiftCaret(textarea.value, next, textarea.selectionStart))
+    }
+
+    // After an ordered item is deleted or demoted at `fromOffset`, resequence the
+    // run that now starts there so the numbers don't skip.
+    _renumberFollowingRun(textarea, fromOffset) {
+        const next = this._renumberedText(textarea.value, fromOffset, true)
+        if (next === null) return
+        this._applyDiff(textarea, next, this._shiftCaret(textarea.value, next, textarea.selectionStart))
     }
 
     // ── In-memory render normalization (NEVER mutates the file) ─────
@@ -3125,13 +3757,40 @@ export class ThoughtCollector {
             if (mask[i]) { out.push(raw); continue }
 
             const { cols, rest } = this._measureCols(raw, TAB)
-            const restR = rest.replace(/[ \t]+$/, '')
+            // Two trailing spaces are Markdown's hard line break. Trimming them
+            // here, before marked ever saw them, silently joined the lines the
+            // user had deliberately broken.
+            const hardBreak = /  +$/.test(rest) && rest.trim() !== ''
+            const keep = t => t.replace(/[ \t]+$/, '') + (hardBreak ? '  ' : '')
+            const restR = keep(rest)
             if (rest.trim() === '') { out.push(''); continue }
 
-            const isThematic = /^([-*_])\1{2,}\s*$/.test(rest)
+            // Four columns of indent outside any list is an indented code
+            // block. Re-indenting its lines because one happens to start with
+            // "- " turned the code into a bullet list.
+            if (!stack.length && cols >= 4) { out.push(raw); continue }
+
+            const isThematic = /^([-*_])(?:[ \t]*\1){2,}[ \t]*$/.test(rest.trim())
             const lm = isThematic ? null : rest.match(/^([-*+]|\d{1,9}[.)])(\s+)/)
 
             if (lm) {
+                // "- [ ]" with nothing after it isn't a task list item to the
+                // renderer — it falls back to literal "[ ]" text. A zero-width
+                // space gives it the content it needs so a freshly-made task
+                // shows an empty checkbox. Render-time only; the file is
+                // untouched.
+                const emptyTask = /^([-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\][ \t]*$/.test(restR)
+                if (emptyTask) {
+                    while (stack.length && cols < stack[stack.length - 1].srcCol - tol) stack.pop()
+                    const outCol = stack.length
+                        ? (cols >= stack[stack.length - 1].srcCol + 1
+                            ? stack[stack.length - 1].contentCol
+                            : (stack.pop(), stack.length ? stack[stack.length - 1].contentCol : 0))
+                        : 0
+                    stack.push({ srcCol: cols, contentCol: outCol + lm[1].length + 1 })
+                    out.push(' '.repeat(outCol) + restR.replace(/[ \t]*$/, '') + ' \u200b')
+                    continue
+                }
                 const marker = lm[1]
                 const markerW = marker.length
                 const contentOffset = markerW + 1
@@ -3150,30 +3809,59 @@ export class ThoughtCollector {
                 continue
             }
 
-            if (stack.length === 0) { out.push(raw.replace(/[ \t]+$/, '')); continue }
+            if (stack.length === 0) { out.push(keep(raw)); continue }
             let host = null
             for (let s = stack.length - 1; s >= 0; s--) {
                 if (cols >= stack[s].contentCol - tol) { host = stack[s]; break }
             }
             if (host) {
                 if (cols >= host.contentCol + 4) {
-                    out.push(raw.replace(/[ \t]+$/, ''))
+                    out.push(keep(raw))
                 } else {
                     out.push(' '.repeat(host.contentCol) + restR)
                 }
             } else {
                 stack.length = 0
-                out.push(raw.replace(/[ \t]+$/, ''))
+                out.push(keep(raw))
             }
         }
         return out.join(EOL)
     }
 
+    // Run `fn` over the prose of `md` only. Fenced code blocks pass through
+    // untouched and inline code spans are parked on placeholders, so a rule that
+    // spans lines still sees the prose around them as one piece of text. The
+    // passes below are plain global regexes: without this, `#include`, a CSS
+    // colour, `a == b` or a Windows path inside a code block is rewritten into
+    // markup, and since `marked` escapes code the reader sees that markup
+    // verbatim where their code should be.
+    _outsideCode(md, fn) {
+        const lines = md.split('\n')
+        const mask = this._fenceMask(lines)
+        const out = []
+        let run = []
+        const flush = () => {
+            if (!run.length) return
+            const spans = []
+            const parked = run.join('\n').replace(/`+[^`\n]*`+/g, (m) => {
+                spans.push(m)
+                return `\u0000${spans.length - 1}\u0000`
+            })
+            out.push(fn(parked).replace(/\u0000(\d+)\u0000/g, (_, i) => spans[+i]))
+            run = []
+        }
+        for (let i = 0; i < lines.length; i++) {
+            if (mask[i]) { flush(); out.push(lines[i]) }
+            else run.push(lines[i])
+        }
+        flush()
+        return out.join('\n')
+    }
+
     // Shared markdown→HTML pipeline (indent fix FIRST, then math, then Obsidian preprocess).
     _mdToHtml(str) {
         let s = this._normaliseIndentForRender(str || '')
-        s = this._normaliseMath(s)
-        s = this._preprocessMarkdown(s)
+        s = this._outsideCode(s, t => this._preprocessMarkdown(this._normaliseMath(t)))
         if (typeof marked === 'undefined') return this._esc(s)
         return DOMPurify.sanitize(marked.parse(s), {
             USE_PROFILES: { html: true },
@@ -3188,77 +3876,170 @@ export class ThoughtCollector {
         const end = textarea.selectionEnd
 
         // Let the wikilink autocomplete dropdown own Enter/Tab while it is open.
-        if ((e.key === 'Enter' || e.key === 'Tab') && this._wikilinkOpen) return
+        // The dropdown owns Enter while it is open. It also owns Tab — but it
+        // only listens for Enter, so returning here let Tab move focus out of
+        // the editor entirely; preventing it keeps the caret where it is.
+        if (e.key === 'Enter' && this._wikilinkOpen) return
+        if (e.key === 'Tab' && this._wikilinkOpen) { e.preventDefault(); return }
 
         // ── Enter: continue lists / tasks / ordered / quotes ──────
         // Cmd/Ctrl+Enter is "toggle task done" — let it fall through to the shortcut handler.
         if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey && start === end) {
-            const lineStart = val.lastIndexOf('\n', start - 1) + 1
-            const currentLine = val.slice(lineStart, start)
+            const { lineStart, lineEnd } = this._lineBounds(val, start)
+            // The WHOLE line, not just what precedes the caret. Matching on the
+            // text before the caret made "- |foo" look like an empty item, so
+            // Enter at the start of an item deleted its bullet instead of
+            // pushing the item down — the bug the user hit every time.
+            const fullLine = val.slice(lineStart, lineEnd)
+            const caretCol = start - lineStart
+            // Inside a fenced code block "1. step" and "> x" are code the user
+            // typed, not a list or a quote to continue: hand Enter back to the
+            // browser rather than writing a bullet into their code and
+            // resequencing the numbered lines around it.
+            if (this._caretInFence(val, lineStart)) return
+            const item = this._parseListLine(fullLine)
 
-            // List / ordered / task continuation. Indent group allows tabs or spaces.
-            const listMatch = currentLine.match(/^([ \t]*)([-*+]|\d+[.)]) (\[[ xX]\] )?/)
-            if (listMatch) {
-                const indent = listMatch[1]
-                const bullet = listMatch[2]
-                const taskPart = listMatch[3] || ''
-                const lineContent = currentLine.slice(listMatch[0].length)
+            if (item) {
+                const tail = fullLine.slice(Math.max(caretCol, item.prefixLen))
+                const atOrBeforeContent = caretCol <= item.prefixLen
 
-                // Empty item (only the marker) → outdent one level, else exit the list.
-                if (!lineContent.trim()) {
+                // Shift+Enter → a continuation line inside the same item,
+                // aligned under its text so wrapped prose stays in the bullet.
+                if (e.shiftKey) {
                     e.preventDefault()
-                    if (this._indentLevels(indent) >= 1) {
-                        const newIndent = this._removeOneLevel(indent)
-                        const newLine = newIndent + bullet + ' ' + taskPart
-                        const newVal = val.slice(0, lineStart) + newLine + val.slice(start)
-                        const newPos = lineStart + newLine.length
-                        textarea.value = newVal
-                        textarea.setSelectionRange(newPos, newPos)
+                    const pad = ' '.repeat(this._indentWidth(item.indent) + item.bullet.length + item.gap.length + item.task.length)
+                    // A bare newline inside an item is a Markdown *soft* break:
+                    // the preview joins the two lines back into one, so the
+                    // continuation the user just made was invisible there. The
+                    // trailing backslash is a hard break, and unlike the
+                    // two-trailing-spaces form it survives the whitespace trim
+                    // in _normaliseIndentForRender.
+                    this._applyEdit(textarea, start, start, '\\\n' + pad)
+                    return
+                }
+
+                // Empty item (marker only, nothing either side of the caret) →
+                // outdent a level, or leave the list entirely at the top level.
+                if (!item.content.trim()) {
+                    e.preventDefault()
+                    if (this._indentLevels(item.indent) >= 1) {
+                        const newIndent = this._removeOneLevel(item.indent)
+                        const newLine = newIndent + item.bullet + ' ' + item.task
+                        this._applyListEdit(textarea, lineStart, lineEnd, newLine,
+                            lineStart + newLine.length,
+                            item.ordered ? [{ at: lineStart }] : null)
                     } else {
-                        const newVal = val.slice(0, lineStart) + '\n' + val.slice(start)
-                        textarea.value = newVal
-                        textarea.setSelectionRange(lineStart + 1, lineStart + 1)
+                        this._applyListEdit(textarea, lineStart, lineEnd, '', lineStart,
+                            [{ at: lineStart, following: true }])
                     }
-                    textarea.dispatchEvent(new Event('input'))
                     return
                 }
 
                 e.preventDefault()
-                let nextBullet = bullet
-                const isOrdered = /^\d+[.)]$/.test(bullet)
-                if (isOrdered) nextBullet = (parseInt(bullet, 10) + 1) + bullet.slice(-1)
-                const nextTask = taskPart ? '[ ] ' : ''
-                const insertion = '\n' + indent + nextBullet + ' ' + nextTask
-                const newVal = val.slice(0, start) + insertion + val.slice(end)
-                textarea.value = newVal
-                const newPos = start + insertion.length
-                textarea.setSelectionRange(newPos, newPos)
-                // Keep the ordered run sequential after inserting a new item.
-                if (isOrdered) this._renumberRun(textarea, newPos - insertion.length + 1)
-                textarea.dispatchEvent(new Event('input'))
+                const marker = item.indent + item.bullet + item.gap + (item.task ? '[ ] ' : '')
+
+                if (atOrBeforeContent) {
+                    // Caret sits at the start of the item's text: open an empty
+                    // item ABOVE and let this one slide down, keeping the caret
+                    // on the text the user was standing in front of.
+                    // Keep the trailing space: a bare "-" is not a marker the
+                    // ordered-list renumberer recognises, and the empty item
+                    // should be typable the moment the user clicks into it.
+                    // A new item is never pre-ticked, even above a done task.
+                    const blank = item.indent + item.bullet + item.gap + (item.task ? '[ ] ' : '')
+                    // A marker-only line directly below a paragraph is read by
+                    // CommonMark as a setext underline — "Notes\n- " renders the
+                    // paragraph as an <h2>. A blank separator keeps it a list,
+                    // and a blank line before a list is canonical Markdown.
+                    const prevEnd = lineStart - 1
+                    const needsGap = lineStart > 0 && (() => {
+                        const prevStart = val.lastIndexOf('\n', prevEnd - 1) + 1
+                        const prev = val.slice(prevStart, prevEnd)
+                        return prev.trim() !== '' && !this._parseListLine(prev)
+                    })()
+                    const insertion = (needsGap ? '\n' : '') + blank + '\n'
+                    this._applyListEdit(
+                        textarea, lineStart, lineStart, insertion,
+                        lineStart + insertion.length + item.prefixLen,
+                        item.ordered ? [{ at: lineStart + (needsGap ? 1 : 0) }] : null,
+                    )
+                    return
+                }
+
+                // Caret inside the text: split the item, carrying the tail down.
+                this._applyListEdit(
+                    textarea, start, lineEnd, '\n' + marker + tail,
+                    start + 1 + marker.length,
+                    item.ordered ? [{ at: lineStart }] : null,
+                )
                 return
             }
 
             // Blockquote continuation (allow leading indent before >).
-            const blockquoteMatch = currentLine.match(/^([ \t]*>[ \t]?)+/)
+            const blockquoteMatch = fullLine.match(/^([ \t]*>[ \t]?)+/)
             if (blockquoteMatch) {
                 const prefix = blockquoteMatch[0]
-                const lineContent = currentLine.slice(prefix.length)
-                if (!lineContent.trim()) {
+                if (!fullLine.slice(prefix.length).trim()) {
                     e.preventDefault()
-                    const newVal = val.slice(0, lineStart) + '\n' + val.slice(start)
-                    textarea.value = newVal
-                    textarea.setSelectionRange(lineStart + 1, lineStart + 1)
-                    textarea.dispatchEvent(new Event('input'))
+                    this._applyEdit(textarea, lineStart, lineEnd, '', lineStart)
                     return
                 }
                 e.preventDefault()
-                const insertion = '\n' + prefix
-                const newVal = val.slice(0, start) + insertion + val.slice(end)
-                textarea.value = newVal
-                const newPos = start + insertion.length
-                textarea.setSelectionRange(newPos, newPos)
-                textarea.dispatchEvent(new Event('input'))
+                if (e.shiftKey) {
+                    this._applyEdit(textarea, start, start, '\n' + prefix)
+                    return
+                }
+                const tail = fullLine.slice(Math.max(start - lineStart, prefix.length))
+                this._applyEdit(textarea, start, lineEnd, '\n' + prefix + tail, start + 1 + prefix.length)
+                return
+            }
+        }
+
+        // ── Backspace at the start of a list item's text ──────────
+        // Removes one level of nesting, then the marker itself, instead of
+        // silently eating the space between the bullet and the word.
+        if (e.key === 'Backspace' && !e.metaKey && !e.ctrlKey && !e.altKey && start === end) {
+            const { lineStart, lineEnd } = this._lineBounds(val, start)
+            const fullLine = val.slice(lineStart, lineEnd)
+            const item = this._caretInFence(val, lineStart) ? null : this._parseListLine(fullLine)
+            if (item && start - lineStart === item.prefixLen) {
+                e.preventDefault()
+                // Move the item's descendants with it, exactly as Shift+Tab
+                // does. Outdenting the one line left its sub-items behind at
+                // their old depth, where the renderer re-hosted them under
+                // whatever now sat above them.
+                const { start: rStart, end: rEnd } = this._subtreeRange(val, lineStart)
+                const blines = val.slice(rStart, rEnd).split('\n')
+                const mask = this._fenceMask(blines)
+                if (this._indentLevels(item.indent) >= 1) {
+                    const newIndent = this._removeOneLevel(item.indent)
+                    const delta = item.indent.length - newIndent.length
+                    const cut = this._indentWidth(item.indent) - this._indentWidth(newIndent)
+                    const moved = blines.map((ln, idx) => {
+                        if (mask[idx] || ln.trim() === '') return ln
+                        const { indent, rest } = this._splitIndent(ln)
+                        return (idx === 0 ? newIndent : this._removeIndentCols(indent, cut)) + rest
+                    })
+                    this._applyListEdit(
+                        textarea, rStart, rEnd, moved.join('\n'),
+                        Math.max(lineStart, start - delta),
+                        item.ordered ? [{ at: lineStart }] : null,
+                    )
+                } else {
+                    // Top level → drop the marker, keep the text. The children
+                    // still come up a level, so they aren't left hanging off a
+                    // line that is no longer a list item at all.
+                    const moved = blines.map((ln, idx) => {
+                        if (idx === 0) return item.content
+                        if (mask[idx] || ln.trim() === '') return ln
+                        const { indent, rest } = this._splitIndent(ln)
+                        return this._removeOneLevel(indent) + rest
+                    })
+                    this._applyListEdit(
+                        textarea, rStart, rEnd, moved.join('\n'), lineStart,
+                        [{ at: lineStart, following: true }],
+                    )
+                }
                 return
             }
         }
@@ -3270,7 +4051,10 @@ export class ThoughtCollector {
                 val.slice(start, end).includes('\n')
             const { lineStart, lineEnd } = this._lineBounds(val, start)
             const currentLine = val.slice(lineStart, lineEnd)
-            const isListLine = /^[ \t]*([-*+]|\d+[.)]) /.test(currentLine)
+            // A "- foo" line inside a code fence is code: let it fall through to
+            // the plain tab insert below instead of being re-indented as a list.
+            const isListLine = /^[ \t]*([-*+]|\d+[.)]) /.test(currentLine) &&
+                !this._caretInFence(val, lineStart)
 
             if (selSpansLines) {
                 this._indentSelection(textarea, e.shiftKey)
@@ -3278,39 +4062,44 @@ export class ThoughtCollector {
             }
 
             if (isListLine) {
+                // Markdown only nests a list item one level below its previous
+                // sibling. Indenting further produces a list `marked` refuses to
+                // nest, which is what made sub-bullets "not connect" in the
+                // preview — so refuse the keystroke instead of writing a
+                // structure that can't render.
+                if (!e.shiftKey && !this._canIndentListLine(val, lineStart)) return
+
                 // Indent / outdent the whole subtree (item + deeper descendants).
                 const { start: rStart, end: rEnd } = this._subtreeRange(val, lineStart)
                 const block = val.slice(rStart, rEnd)
-                const mask = this._fenceMask(block.split('\n'))
                 const blines = block.split('\n')
-                let removedOnFirst = 0
+                const mask = this._fenceMask(blines)
+                // Outdent every line of the subtree by the same number of
+                // columns the item itself loses, so the nesting keeps its shape.
+                const firstIndent = this._splitIndent(blines[0]).indent
+                const cut = this._indentWidth(firstIndent) - this._indentWidth(this._removeOneLevel(firstIndent))
+                let deltaOnFirst = 0
                 const newLines = blines.map((ln, idx) => {
-                    if (mask[idx]) return ln
+                    if (mask[idx] || ln.trim() === '') return ln
                     if (e.shiftKey) {
                         const { indent, rest } = this._splitIndent(ln)
-                        const newIndent = this._removeOneLevel(indent)
-                        if (idx === 0) removedOnFirst = indent.length - newIndent.length
+                        const newIndent = (idx > 0 && cut > 0)
+                            ? this._removeIndentCols(indent, cut)
+                            : this._removeOneLevel(indent)
+                        if (idx === 0) deltaOnFirst = newIndent.length - indent.length
                         return newIndent + rest
                     }
-                    return ln === '' ? ln : '\t' + ln
+                    if (idx === 0) deltaOnFirst = 1
+                    return '\t' + ln
                 })
                 const newBlock = newLines.join('\n')
-                textarea.value = val.slice(0, rStart) + newBlock + val.slice(rEnd)
-                let np
-                if (e.shiftKey) np = Math.max(lineStart, start - removedOnFirst)
-                else np = start + 1
-                textarea.setSelectionRange(np, np)
+                if (newBlock === block) return
+                const np = Math.max(lineStart, start + deltaOnFirst)
                 // Renumber both the moved item's (new) run and the run it left behind.
-                if (/^[ \t]*\d+[.)] /.test(currentLine)) {
-                    this._renumberRun(textarea, lineStart) // new level run
-                    const afterIdx = rStart + newBlock.length + 1 // first line after moved subtree
-                    if (afterIdx <= textarea.value.length) {
-                        const aStart = textarea.value.lastIndexOf('\n', afterIdx - 1) + 1
-                        this._renumberRun(textarea, aStart) // old sibling run
-                    }
-                    textarea.setSelectionRange(np, np)
-                }
-                textarea.dispatchEvent(new Event('input'))
+                const ordered = /^[ \t]*\d{1,9}[.)][ \t]+/.test(currentLine)
+                this._applyListEdit(textarea, rStart, rEnd, newBlock, np, ordered
+                    ? [{ at: lineStart }, { at: rStart + newBlock.length + 1, following: true }]
+                    : null)
                 return
             }
 
@@ -3320,14 +4109,10 @@ export class ThoughtCollector {
                 const newIndent = this._removeOneLevel(indent)
                 const removed = indent.length - newIndent.length
                 if (removed === 0) return
-                textarea.value = val.slice(0, lineStart) + newIndent + rest + val.slice(lineEnd)
-                const np = Math.max(lineStart, start - removed)
-                textarea.setSelectionRange(np, np)
-                textarea.dispatchEvent(new Event('input'))
+                this._applyEdit(textarea, lineStart, lineEnd, newIndent + rest,
+                    Math.max(lineStart, start - removed))
             } else {
-                textarea.value = val.slice(0, lineStart) + '\t' + val.slice(lineStart)
-                textarea.setSelectionRange(start + 1, start + 1)
-                textarea.dispatchEvent(new Event('input'))
+                this._applyEdit(textarea, lineStart, lineStart, '\t', start + 1)
             }
             return
         }
@@ -3341,18 +4126,29 @@ export class ThoughtCollector {
                 e.preventDefault()
                 const close = OPEN[e.key] ?? EMPH[e.key]
                 const selected = val.slice(start, end)
-                textarea.value = val.slice(0, start) + e.key + selected + close + val.slice(end)
-                textarea.setSelectionRange(start + 1, end + 1)
-                textarea.dispatchEvent(new Event('input'))
+                this._applyEdit(textarea, start, end, e.key + selected + close, start + 1, end + 1)
+                return
+            }
+            // Type-through: if the very next character is the closer we put
+            // there, step over it instead of adding a second one. Without this,
+            // typing "(a note)" left "(a note))" and "[a](b)" left "[a](b))]".
+            const CLOSERS = new Set([')', ']', '}', '"', "'", '`'])
+            if (start === end && CLOSERS.has(e.key) && val[start] === e.key) {
+                e.preventDefault()
+                textarea.setSelectionRange(start + 1, start + 1)
                 return
             }
             // Empty caret: auto-close brackets/quotes only (not emphasis, so ** still works).
             if (start === end && e.key in OPEN) {
+                // A quote or backtick right after a word is an apostrophe or a
+                // closing quote, not the start of a pair — "don't" should not
+                // become "don''t". Brackets are always paired.
+                const prev = val[start - 1]
+                const quoteLike = e.key === '"' || e.key === "'" || e.key === '`'
+                if (quoteLike && prev && /[\w)\]}"'`]/.test(prev)) return
                 e.preventDefault()
                 const close = OPEN[e.key]
-                textarea.value = val.slice(0, start) + e.key + close + val.slice(end)
-                textarea.setSelectionRange(start + 1, start + 1)
-                textarea.dispatchEvent(new Event('input'))
+                this._applyEdit(textarea, start, end, e.key + close, start + 1)
                 return
             }
             // Backspace between an adjacent auto-pair removes both chars.
@@ -3361,9 +4157,7 @@ export class ThoughtCollector {
                 const next = val[start]
                 if (OPEN[prev] && OPEN[prev] === next) {
                     e.preventDefault()
-                    textarea.value = val.slice(0, start - 1) + val.slice(start + 1)
-                    textarea.setSelectionRange(start - 1, start - 1)
-                    textarea.dispatchEvent(new Event('input'))
+                    this._applyEdit(textarea, start - 1, start + 1, '', start - 1)
                     return
                 }
             }
@@ -3383,7 +4177,12 @@ export class ThoughtCollector {
         const lastLineEnd = val.indexOf('\n', blockEnd) === -1 ? val.length : val.indexOf('\n', blockEnd)
         const block = val.slice(firstLineStart, lastLineEnd)
         const blines = block.split('\n')
-        const mask = this._fenceMask(blines)
+        // Mask the whole document and slice out this block. Masking the block on
+        // its own means a selection that STARTS inside a fence reads that
+        // fence's closing ``` as an opening one and gets the protection exactly
+        // backwards: it re-indents the code and skips the prose after it.
+        const firstIdx = val.slice(0, firstLineStart).split('\n').length - 1
+        const mask = this._fenceMask(val.split('\n')).slice(firstIdx, firstIdx + blines.length)
         let deltaFirst = 0, deltaTotal = 0
         const newLines = blines.map((ln, idx) => {
             if (mask[idx]) return ln
@@ -3400,11 +4199,8 @@ export class ThoughtCollector {
             deltaTotal += 1
             return '\t' + ln
         })
-        textarea.value = val.slice(0, firstLineStart) + newLines.join('\n') + val.slice(lastLineEnd)
-        const newStart = Math.max(firstLineStart, start + deltaFirst)
-        const newEnd = end + deltaTotal
-        textarea.setSelectionRange(newStart, newEnd)
-        textarea.dispatchEvent(new Event('input'))
+        this._applyEdit(textarea, firstLineStart, lastLineEnd, newLines.join('\n'),
+            Math.max(firstLineStart, start + deltaFirst), end + deltaTotal)
     }
 
     // ── Toggle selected line(s) as bullet / ordered / task list ────
@@ -3418,7 +4214,9 @@ export class ThoughtCollector {
             : val.indexOf('\n', selEnd === selStart ? selEnd : selEnd - 1)
         const block = val.slice(firstLineStart, lastLineEnd)
         const blines = block.split('\n')
-        const mask = this._fenceMask(blines)
+        // Document-wide mask, sliced to this block — see _indentSelection.
+        const firstIdx = val.slice(0, firstLineStart).split('\n').length - 1
+        const mask = this._fenceMask(val.split('\n')).slice(firstIdx, firstIdx + blines.length)
         const stripRe = /^([ \t]*)(?:#{1,6} +|>[ \t]?|(?:[-*+]|\d+[.)]) (?:\[[ xX]\] )?)/
         const typeRe = type === 'ul'
             ? /^[ \t]*[-*+] (?!\[[ xX]\] )/
@@ -3428,7 +4226,10 @@ export class ThoughtCollector {
         // Toggle OFF only if every non-blank/non-code line already is this exact type.
         const relevant = blines.filter((ln, i) => !mask[i] && ln.trim() !== '')
         const allAreType = relevant.length > 0 && relevant.every(ln => typeRe.test(ln))
-        let counter = 1
+        // One counter per indent column. A single counter running through the
+        // whole selection gives a nested item its parent's next number, and
+        // `marked` then starts the nested list at that number instead of at 1.
+        const counters = new Map()
         const newLines = blines.map((ln, idx) => {
             if (mask[idx] || ln.trim() === '') return ln
             const { indent } = this._splitIndent(ln)
@@ -3436,13 +4237,25 @@ export class ThoughtCollector {
             const bare = stripped.slice(indent.length)
             if (allAreType) return indent + bare // toggle off
             if (type === 'ul') return indent + '- ' + bare
-            if (type === 'ol') return indent + (counter++) + '. ' + bare
+            if (type === 'ol') {
+                const col = this._indentWidth(indent)
+                for (const k of [...counters.keys()]) if (k > col) counters.delete(k)
+                const n = (counters.get(col) || 0) + 1
+                counters.set(col, n)
+                return indent + n + '. ' + bare
+            }
             return indent + '- [ ] ' + bare
         })
-        textarea.value = val.slice(0, firstLineStart) + newLines.join('\n') + val.slice(lastLineEnd)
-        const newEnd = firstLineStart + newLines.join('\n').length
-        textarea.setSelectionRange(firstLineStart, newEnd)
-        textarea.dispatchEvent(new Event('input'))
+        const joined = newLines.join('\n')
+        // Leaving the whole rewritten block selected meant the next character
+        // typed replaced the line. With a collapsed caret the block is a single
+        // line, so the caret just moves by the block's change in length.
+        const collapsed = selStart === selEnd
+        const caret = Math.max(firstLineStart,
+            Math.min(selStart + (joined.length - block.length), firstLineStart + joined.length))
+        this._applyEdit(textarea, firstLineStart, lastLineEnd, joined,
+            collapsed ? caret : firstLineStart,
+            collapsed ? caret : firstLineStart + joined.length)
     }
 
     // Toggle the done state of any task line(s) in the selection.
@@ -3456,7 +4269,11 @@ export class ThoughtCollector {
             : val.indexOf('\n', selEnd === selStart ? selEnd : selEnd - 1)
         const block = val.slice(firstLineStart, lastLineEnd)
         const blines = block.split('\n')
-        const taskRe = /^([ \t]*[-*+] \[)([ xX])(\] )/
+        // Accept every marker the renderer draws a checkbox for: a tab or a
+        // double space after the bullet, an ordered "1." marker, and a bare
+        // "- [ ]" whose line ends right after the bracket. Read narrowly,
+        // Cmd+Enter simply did nothing on such a line.
+        const taskRe = /^((?:[ \t]*>)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[)([ xX])(\](?=[ \t]|$))/
         const tasks = blines.filter(ln => taskRe.test(ln))
         if (tasks.length === 0) return
         const allDone = tasks.every(ln => taskRe.exec(ln)[2].toLowerCase() === 'x')
@@ -3466,9 +4283,7 @@ export class ThoughtCollector {
             return m[1] + (allDone ? ' ' : 'x') + m[3] + ln.slice(m[0].length)
         })
         const caret = textarea.selectionStart
-        textarea.value = val.slice(0, firstLineStart) + newLines.join('\n') + val.slice(lastLineEnd)
-        textarea.setSelectionRange(caret, caret)
-        textarea.dispatchEvent(new Event('input'))
+        this._applyEdit(textarea, firstLineStart, lastLineEnd, newLines.join('\n'), caret, caret)
     }
 
     // ── Smart paste: URL over selection → link ────────────────
@@ -3491,9 +4306,7 @@ export class ThoughtCollector {
             } else {
                 replacement = `[${selected}](${clipText.trim()})`
             }
-            const newVal = textarea.value.slice(0, start) + replacement + textarea.value.slice(end)
-            textarea.value = newVal
-            textarea.setSelectionRange(start + replacement.length, start + replacement.length)
+            this._applyEdit(textarea, start, end, replacement)
             markDirty()
             clearTimeout(this._previewTimer)
             this._previewTimer = setTimeout(() => this._renderPreview(preview, textarea.value), 100)
@@ -3542,9 +4355,7 @@ export class ThoughtCollector {
             const url = await this._showModal({ type: 'input', title: 'INSERT LINK', placeholder: 'https://...', defaultValue: '' })
             if (!url) return
             const link = `[${selected}](${url.trim()})`
-            const newVal = textarea.value.slice(0, start) + link + textarea.value.slice(end)
-            textarea.value = newVal
-            textarea.setSelectionRange(start + link.length, start + link.length)
+            this._applyEdit(textarea, start, end, link)
             textarea.focus()
             markDirty()
             this._renderPreview(preview, textarea.value)
@@ -3631,14 +4442,18 @@ export class ThoughtCollector {
             const before = val.slice(0, pos)
             const openBracket = before.lastIndexOf('[[')
             if (openBracket === -1) { close(); return }
-            const after = val.slice(pos)
-            const closeBracketIdx = after.indexOf(']]')
-            const endPos = closeBracketIdx !== -1 ? pos + closeBracketIdx + 2 : pos
+            // Only swallow a "]]" that can plausibly close the caret's own
+            // brackets: on this line, with no other "[" in between. The dropdown
+            // is open precisely when the "[[" before the caret is unclosed — after
+            // retyping a link's name, or on pasted text — so an unbounded search
+            // finds the closing brackets of an unrelated link further down the
+            // note and accepting the suggestion deletes everything in between.
+            const lineEnd = val.indexOf('\n', pos)
+            const segment = val.slice(pos, lineEnd === -1 ? val.length : lineEnd)
+            const rel = segment.indexOf(']]')
+            const endPos = (rel !== -1 && !segment.slice(0, rel).includes('[')) ? pos + rel + 2 : pos
             const replacement = `[[${file.title}]]`
-            textarea.value = val.slice(0, openBracket) + replacement + val.slice(endPos)
-            const newPos = openBracket + replacement.length
-            textarea.setSelectionRange(newPos, newPos)
-            textarea.dispatchEvent(new Event('input'))
+            this._applyEdit(textarea, openBracket, endPos, replacement)
             markDirty()
             this._renderPreview(preview, textarea.value)
             close()
@@ -3667,7 +4482,7 @@ export class ThoughtCollector {
             if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % candidates.length; render() }
             else if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + candidates.length) % candidates.length; render() }
             else if (e.key === 'Enter' && candidates.length) { e.preventDefault(); accept(candidates[selectedIdx]) }
-            else if (e.key === 'Escape') { e.preventDefault(); close() }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close() }
         })
 
         textarea.addEventListener('blur', () => setTimeout(close, 200))
@@ -3684,29 +4499,49 @@ export class ThoughtCollector {
 
     // ── Sync checkbox click in preview → editor text ──────────
     _syncCheckboxToEditor(checkbox, textarea) {
-        const isChecked = !checkbox.checked  // it was prevented, so state is pre-click
-        const taskItem = checkbox.closest('.task-list-item') || checkbox.parentElement
-        // Get the text content to find it in the editor
-        const itemText = taskItem.textContent.trim().replace(/^[\s✓x✗]*/, '').trim()
+        // Match by POSITION, not by text. The old code looked for the first
+        // source line whose text overlapped the clicked item, so two tasks with
+        // the same (or one containing the other's) wording toggled each other —
+        // ticking "buy milk" would tick "buy milk tomorrow" further up instead.
+        // Only this note's own checkboxes count. A transcluded note (![[other]])
+        // renders its tasks into the same preview element, and including those
+        // would shift every index past the embed.
+        const root = checkbox.closest('.editor-preview')
+        if (!root || checkbox.closest('.embed-block')) return
+        const boxes = Array.from(root.querySelectorAll('input[type="checkbox"]'))
+            .filter(cb => !cb.closest('.embed-block'))
+        const nth = boxes.indexOf(checkbox)
+        if (nth === -1) return
 
         const val = textarea.value
-        // Find the matching task in the markdown
-        // Pattern: - [ ] or - [x] followed by the text
         const lines = val.split('\n')
+        const mask = this._fenceMask(lines)
+        // The `]` may be followed by whitespace or end the line: an item the user
+        // has only just created ("- [ ]") is rendered as a checkbox, so it has to
+        // be counted here too or every checkbox below it maps one line too high.
+        const taskRe = /^((?:[ \t]*>)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[)([ xX])(\](?=[ \t]|$))/
+        let seen = -1
         for (let i = 0; i < lines.length; i++) {
-            const line = lines[i]
-            const taskMatch = line.match(/^(\s*[-*+] \[)([ xX])(\] )(.*)$/)
-            if (taskMatch) {
-                const lineText = taskMatch[4].trim()
-                if (itemText.includes(lineText) || lineText.includes(itemText.slice(0, 30))) {
-                    const currentlyChecked = taskMatch[2].toLowerCase() === 'x'
-                    // Toggle
-                    lines[i] = taskMatch[1] + (currentlyChecked ? ' ' : 'x') + taskMatch[3] + taskMatch[4]
-                    textarea.value = lines.join('\n')
-                    textarea.dispatchEvent(new Event('input'))
-                    break
-                }
+            if (mask[i]) continue
+            const m = lines[i].match(taskRe)
+            if (!m) continue
+            if (++seen !== nth) continue
+            const lineStart = lines.slice(0, i).reduce((n, ln) => n + ln.length + 1, 0)
+            const currentlyChecked = m[2].toLowerCase() === 'x'
+            const caret = textarea.selectionStart
+            // _applyEdit focuses the textarea to run the edit; in split view the
+            // user clicked in the preview and expects to stay there.
+            const wasActive = document.activeElement
+            this._applyEdit(
+                textarea,
+                lineStart + m[1].length, lineStart + m[1].length + 1,
+                currentlyChecked ? ' ' : 'x',
+                caret, caret,
+            )
+            if (wasActive && wasActive !== textarea && wasActive.isConnected) {
+                wasActive.focus({ preventScroll: true })
             }
+            return
         }
     }
 
@@ -3741,8 +4576,7 @@ export class ThoughtCollector {
         }
         textarea.focus()
         textarea.setSelectionRange(pos, pos)
-        const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
-        textarea.scrollTop = bestLine * lineHeight - textarea.clientHeight / 2
+        this._scrollTextareaTo(textarea, pos)
     }
 
     _textOverlap(a, b) {
@@ -3911,8 +4745,8 @@ export class ThoughtCollector {
             { name: 'Toggle Outline Panel', action: () => { this._outlineOpen = !this._outlineOpen; this._updateOutlinePanel() } },
             { name: 'Toggle Backlinks Panel', action: () => { this._backlinksOpen = !this._backlinksOpen; this._updateBacklinksPanel() } },
             { name: 'Keyboard Shortcuts', key: `${mod}+/`, action: () => this._showShortcutsPanel() },
-            ...THEMES.map(t => ({ name: `Theme: ${t.label}`, action: () => { this._applyTheme(t.id); this._render() } })),
-            { name: 'Log Out', action: async () => { this.destroy(); await auth.logout(); this.onLogout() } },
+            ...THEMES.map(t => ({ name: `Theme: ${t.label}`, action: () => { this._applyTheme(t.id); this._syncThemePicker(t.id) } })),
+            { name: 'Log Out', action: () => this.container.querySelector('#logout-btn')?.click() },
         ]
 
         const overlay = document.createElement('div')
@@ -3954,8 +4788,13 @@ export class ThoughtCollector {
 
         let filteredCommands = renderList()
         input.addEventListener('input', () => { selectedIdx = 0; filteredCommands = renderList(input.value) })
+        // Bound on the overlay, not the input: with focus on a row, Escape
+        // used to fall through to the document handler and close the note.
+        overlay.addEventListener('keydown', e => {
+            if (e.key === 'Escape') { e.stopPropagation(); close() }
+        })
         input.addEventListener('keydown', e => {
-            if (e.key === 'Escape') { close(); return }
+            if (e.key === 'Escape') { e.stopPropagation(); close(); return }
             if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % filteredCommands.length; renderList(input.value) }
             if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + filteredCommands.length) % filteredCommands.length; renderList(input.value) }
             if (e.key === 'Enter') { close(); if (filteredCommands[selectedIdx]) filteredCommands[selectedIdx].action() }
@@ -4037,8 +4876,11 @@ export class ThoughtCollector {
 
         let filteredFiles = renderList()
         input.addEventListener('input', () => { selectedIdx = 0; filteredFiles = renderList(input.value) })
+        overlay.addEventListener('keydown', e => {
+            if (e.key === 'Escape') { e.stopPropagation(); close() }
+        })
         input.addEventListener('keydown', e => {
-            if (e.key === 'Escape') { close(); return }
+            if (e.key === 'Escape') { e.stopPropagation(); close(); return }
             if (e.key === 'ArrowDown') { e.preventDefault(); selectedIdx = (selectedIdx + 1) % filteredFiles.length; renderList(input.value) }
             if (e.key === 'ArrowUp') { e.preventDefault(); selectedIdx = (selectedIdx - 1 + filteredFiles.length) % filteredFiles.length; renderList(input.value) }
             if (e.key === 'Enter') { close(); if (filteredFiles[selectedIdx]) openFile(filteredFiles[selectedIdx]) }
@@ -4086,7 +4928,7 @@ export class ThoughtCollector {
         const close = () => overlay.remove()
         overlay.querySelector('.graph-view-close').addEventListener('click', close)
         overlay.addEventListener('click', e => { if (e.target === overlay) close() })
-        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') close() })
+        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close() } })
         overlay.setAttribute('tabindex', '-1')
         overlay.focus()
 
@@ -4157,6 +4999,10 @@ export class ThoughtCollector {
         // Force simulation
         let animFrame
         const simulate = () => {
+            // Not every way out of this view runs the close handlers below —
+            // a logout tears the overlay off the document directly — and a loop
+            // left running against a detached canvas pins a core forever.
+            if (!overlay.isConnected) return
             // Repulsion between all nodes
             for (let i = 0; i < nodes.length; i++) {
                 for (let j = i + 1; j < nodes.length; j++) {
@@ -4231,7 +5077,7 @@ export class ThoughtCollector {
         overlay.removeEventListener('click', origClose)
         overlay.addEventListener('click', e => { if (e.target === overlay) cleanClose() })
         overlay.removeEventListener('keydown', close)
-        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') cleanClose() })
+        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); cleanClose() } })
     }
 
     // ── Outline Panel ───────────────────────────────────────────
@@ -4277,13 +5123,20 @@ export class ThoughtCollector {
         })
         panel.querySelectorAll('.outline-item').forEach(btn => {
             btn.addEventListener('click', () => {
-                const h = headings[parseInt(btn.dataset.idx)]
+                // The panel stays up while the note is edited, so the offsets it
+                // was built from drift with every character typed above a
+                // heading. Locate the heading in the text as it is now.
+                const idx = parseInt(btn.dataset.idx)
+                const live = textarea.value.split('\n')
+                const at = []
+                live.forEach((line, i) => { if (/^(#{1,6})\s+(.+)/.test(line)) at.push(i) })
+                const lineIndex = at[idx]
+                if (lineIndex === undefined) return
                 let pos = 0
-                for (let i = 0; i < h.lineIndex; i++) pos += lines[i].length + 1
+                for (let i = 0; i < lineIndex; i++) pos += live[i].length + 1
                 textarea.focus()
                 textarea.setSelectionRange(pos, pos)
-                const lineHeight = parseFloat(getComputedStyle(textarea).lineHeight) || 24
-                textarea.scrollTop = h.lineIndex * lineHeight - textarea.clientHeight / 3
+                this._scrollTextareaTo(textarea, pos)
             })
         })
     }
@@ -4327,13 +5180,8 @@ export class ThoughtCollector {
                 if (!folder) return
                 const file = folder.files.find(f => f.id === btn.dataset.fileId)
                 if (!file) return
-                if (this.editorDirty) {
-                    const ok = await this._showModal({ type: 'confirm', title: 'UNSAVED CHANGES', message: 'Leave without saving?' })
-                    if (!ok) return
-                }
-                this.editorDirty = false
                 this.currentFolder = folder
-                this._openFile(file)
+                await this._openFile(file)
             })
         })
     }
@@ -4389,6 +5237,26 @@ export class ThoughtCollector {
         return md
     }
 
+    // The body of an embedded note, fetched at most once per path. Several
+    // blocks (and several repaints) can ask at the same time, so concurrent
+    // callers share one request and the answer goes into the note cache. A
+    // missing file does not: caching '' would make the note look empty to
+    // everything else that reads through the cache.
+    _readEmbedBody(path) {
+        const hit = contentCache.getSync(path)
+        if (hit) return Promise.resolve(hit.content)
+        if (!this._embedReads) this._embedReads = new Map()
+        const inflight = this._embedReads.get(path)
+        if (inflight) return inflight
+        const read = vaultAPI.readFileResult(path).then(({ content, missing }) => {
+            if (!missing) contentCache.set(path, content)
+            return content
+        })
+        this._embedReads.set(path, read)
+        read.catch(() => {}).then(() => this._embedReads.delete(path))
+        return read
+    }
+
     // ── Render preview with source line tracking ──────────────
     _renderPreview(previewEl, markdown) {
         const source = markdown || ''
@@ -4412,6 +5280,24 @@ export class ThoughtCollector {
         previewEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
             cb.removeAttribute('disabled')
             cb.style.cursor = 'pointer'
+            // Wrap the item's own text so a completed task can be struck
+            // through without the line also running across its sub-tasks —
+            // text-decoration inherits and a descendant cannot cancel it, so
+            // the only way to scope it is to give the text its own element.
+            // In a loose list marked wraps the item in a <p>, so the checkbox's
+            // parent is that <p> rather than the <li>. Wrap inside whichever it is.
+            const host = cb.parentElement
+            if (!host || !/^(LI|P)$/.test(host.tagName)) return
+            if (host.querySelector(':scope > .task-text')) return
+            const span = document.createElement('span')
+            span.className = 'task-text'
+            let node = cb.nextSibling
+            while (node && !(node.nodeType === 1 && /^(UL|OL)$/.test(node.tagName))) {
+                const next = node.nextSibling
+                span.appendChild(node)
+                node = next
+            }
+            cb.after(span)
         })
 
         // Style inline code with extra LaTeX-like monospace emphasis
@@ -4502,10 +5388,16 @@ export class ThoughtCollector {
             const file = this._findFileByTitle(target)
             if (file) {
                 try {
+                    // `file.content` is already read through the note cache, so
+                    // only a note this browser has never held needs the network.
+                    // Gating on `contentLoaded` instead meant every repaint — one
+                    // per typing pause — re-downloaded the embedded note.
                     let content = file.content || ''
-                    if (!file.contentLoaded && file.path) {
-                        content = await vaultAPI.readFile(file.path)
-                    }
+                    if (!content && file.path) content = await this._readEmbedBody(file.path)
+                    // A later repaint may have replaced this block while the read
+                    // was in flight; painting into the detached node is what made
+                    // embeds flicker between placeholder and content while typing.
+                    if (!block.isConnected) return
                     const embedHtml = typeof marked !== 'undefined' ? this._mdToHtml(content) : content
                     block.innerHTML = `<div class="embed-content"><div class="embed-title">${this._esc(file.title)}</div>${embedHtml}</div>`
                 } catch {
@@ -4566,7 +5458,7 @@ export class ThoughtCollector {
         document.body.appendChild(overlay)
         const close = () => overlay.remove()
         overlay.addEventListener('click', e => { if (e.target === overlay) close() })
-        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') close() })
+        overlay.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close() } })
         overlay.setAttribute('tabindex', '-1')
         overlay.focus()
 
@@ -4607,7 +5499,13 @@ export class ThoughtCollector {
 
     // ── Saving indicator (non-blocking) ─────────────────────────
     _showSavingOverlay() {
-        if (document.getElementById('saving-overlay')) return
+        // A chained save starts the moment the previous one settles, while the
+        // old node is still fading out on its removal timer. Reusing the node
+        // without cancelling that timer let the second save's overlay vanish
+        // 200ms in, leaving no indicator while the write was still running.
+        clearTimeout(this._savingOverlayTimer)
+        const existing = document.getElementById('saving-overlay')
+        if (existing) { existing.classList.add('visible'); return }
         const el = document.createElement('div')
         el.id = 'saving-overlay'
         el.className = 'saving-indicator'
@@ -4615,14 +5513,15 @@ export class ThoughtCollector {
         el.setAttribute('aria-live', 'polite')
         el.innerHTML = '<span class="saving-label">Saving...</span>'
         document.body.appendChild(el)
-        setTimeout(() => el.classList.add('visible'), 10)
+        this._savingOverlayTimer = setTimeout(() => el.classList.add('visible'), 10)
     }
 
     _hideSavingOverlay() {
+        clearTimeout(this._savingOverlayTimer)
         const el = document.getElementById('saving-overlay')
         if (!el) return
         el.classList.remove('visible')
-        setTimeout(() => el.remove(), 200)
+        this._savingOverlayTimer = setTimeout(() => el.remove(), 200)
     }
 
     // ── Progress toast ────────────────────────────────────────
@@ -4678,7 +5577,57 @@ export class ThoughtCollector {
     }
 
     // ── Utilities ─────────────────────────────────────────────
-    _showModal({ type = 'confirm', title = '', message = '', placeholder = '', defaultValue = '' } = {}) {
+    // Is a dialog on screen? Document-level keys stand down while one is.
+    _overlayOpen() {
+        return !!document.querySelector('.modal-overlay, .move-menu-overlay')
+    }
+
+    // A dialog owns the keyboard for as long as it is up. Tab is kept inside
+    // the box: a dialog you can tab out of leaves the page behind it operable,
+    // and strands the dialog's own Enter/Escape, which only fire while focus is
+    // within it. `dismiss` is what a teardown (logging out, say) calls so the
+    // promise the caller is awaiting gets an answer instead of hanging. The
+    // returned release must be run on every path that removes the overlay.
+    _trapModal(overlay, dismiss) {
+        const previous = document.activeElement
+        const onKeydown = (e) => {
+            if (!overlay.isConnected) { release(); return }
+            if (e.key !== 'Tab') return
+            const els = Array.from(overlay.querySelectorAll('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])'))
+                .filter(el => !el.disabled && el.offsetParent !== null)
+            if (!els.length) return
+            const first = els[0]
+            const last = els[els.length - 1]
+            const active = document.activeElement
+            // Focus that is outside the box, or on the box itself (the confirm
+            // variant parks it there to hear Enter), has no neighbour to step
+            // to — without this, one Shift+Tab lands on the page behind.
+            if (!els.includes(active)) {
+                e.preventDefault()
+                const edge = e.shiftKey ? last : first
+                edge.focus()
+            } else if (e.shiftKey && active === first) {
+                e.preventDefault()
+                last.focus()
+            } else if (!e.shiftKey && active === last) {
+                e.preventDefault()
+                first.focus()
+            }
+        }
+        const release = () => {
+            document.removeEventListener('keydown', onKeydown, true)
+            this._openModals.delete(dismiss)
+            if (previous && previous.isConnected && typeof previous.focus === 'function') previous.focus()
+        }
+        document.addEventListener('keydown', onKeydown, true)
+        this._openModals.add(dismiss)
+        return release
+    }
+
+    // `danger` styles the primary button as destructive. It used to be set on
+    // every confirm dialog, which made it mean nothing — an irreversible delete
+    // looked exactly like "leave without saving?".
+    _showModal({ type = 'confirm', title = '', message = '', placeholder = '', defaultValue = '', danger = false } = {}) {
         return new Promise((resolve) => {
             const overlay = document.createElement('div')
             overlay.className = 'modal-overlay'
@@ -4691,7 +5640,7 @@ export class ThoughtCollector {
                     <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
                         <div class="modal-title" id="modal-title">${safeTitle}</div>
                         <label class="sr-only" for="modal-input">${safeTitle || 'Value'}</label>
-                        <input class="modal-input" id="modal-input" type="text" maxlength="200" placeholder="${safePlaceholder}" value="${this._esc(defaultValue)}" />
+                        <input class="modal-input" id="modal-input" type="text" maxlength="200" placeholder="${safePlaceholder}" />
                         <div class="modal-actions">
                             <button class="modal-btn modal-cancel">CANCEL</button>
                             <button class="modal-btn modal-confirm">OK</button>
@@ -4699,15 +5648,23 @@ export class ThoughtCollector {
                     </div>`
                 document.body.appendChild(overlay)
                 const input = overlay.querySelector('.modal-input')
+                // Set rather than interpolated: a name carrying a quote would be
+                // cut off at that quote on its way through the attribute, and the
+                // truncated remainder is what OK writes back.
+                input.value = defaultValue == null ? '' : String(defaultValue)
+                const release = this._trapModal(overlay, () => cancel())
                 input.focus(); input.select()
-                const confirm = () => { const v = input.value.trim(); overlay.remove(); resolve(v || null) }
-                const cancel  = () => { overlay.remove(); resolve(null) }
+                const confirm = () => { const v = input.value.trim(); release(); overlay.remove(); resolve(v || null) }
+                const cancel  = () => { release(); overlay.remove(); resolve(null) }
                 overlay.querySelector('.modal-confirm').addEventListener('click', confirm)
                 overlay.querySelector('.modal-cancel').addEventListener('click', cancel)
                 overlay.addEventListener('click', e => { if (e.target === overlay) cancel() })
-                input.addEventListener('keydown', e => {
-                    if (e.key === 'Enter') confirm()
-                    if (e.key === 'Escape') cancel()
+                // On the overlay, not the input: once focus moves to a button the
+                // input's handler no longer runs, and Escape would fall through
+                // to the document and navigate the view behind this dialog.
+                overlay.addEventListener('keydown', e => {
+                    if (e.key === 'Enter' && e.target === input) { e.preventDefault(); confirm() }
+                    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel() }
                 })
             } else {
                 overlay.innerHTML = `
@@ -4716,12 +5673,13 @@ export class ThoughtCollector {
                         ${message ? `<div class="modal-message" id="modal-message">${safeMessage}</div>` : ''}
                         <div class="modal-actions">
                             <button class="modal-btn modal-cancel">CANCEL</button>
-                            <button class="modal-btn modal-confirm danger">OK</button>
+                            <button class="modal-btn modal-confirm${danger ? ' danger' : ''}">OK</button>
                         </div>
                     </div>`
                 document.body.appendChild(overlay)
-                const yes = () => { overlay.remove(); resolve(true) }
-                const no  = () => { overlay.remove(); resolve(false) }
+                const release = this._trapModal(overlay, () => no())
+                const yes = () => { release(); overlay.remove(); resolve(true) }
+                const no  = () => { release(); overlay.remove(); resolve(false) }
                 overlay.querySelector('.modal-confirm').addEventListener('click', yes)
                 overlay.querySelector('.modal-cancel').addEventListener('click', no)
                 overlay.addEventListener('click', e => { if (e.target === overlay) no() })
@@ -4729,7 +5687,7 @@ export class ThoughtCollector {
                 overlay.focus()
                 overlay.addEventListener('keydown', e => {
                     if (e.key === 'Enter') yes()
-                    if (e.key === 'Escape') no()
+                    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); no() }
                 })
             }
         })
@@ -4749,11 +5707,18 @@ export class ThoughtCollector {
         }, 4000)
     }
 
+    // Escapes for text and for quoted-attribute positions alike. Quotes matter
+    // as much as angle brackets here: the results land in `title="..."` and
+    // similar, where an unescaped quote ends the attribute early — the text is
+    // silently truncated there, and whatever follows it becomes markup.
     _esc(text) {
-        if (!text) return ''
-        const div = document.createElement('div')
-        div.textContent = text
-        return div.innerHTML
+        if (text === null || text === undefined || text === '') return ''
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
     }
 
     _relTime(iso) {

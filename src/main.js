@@ -1,7 +1,7 @@
 import './style.css'
 import { AuthController } from './auth.js'
 import { ThoughtCollector } from './app.js'
-import { auth, setSessionExpiredHandler, enableMobileRefreshHandlers } from './api.js'
+import { auth, setSessionExpiredHandler, setStorageFullHandler, enableMobileRefreshHandlers } from './api.js'
 
 const appEl = document.querySelector('#app')
 let activeApp = null
@@ -97,6 +97,31 @@ function showDocs() {
 // When session expires (token can't be refreshed), go back to login
 setSessionExpiredHandler(() => {
     showAuthView()
+})
+
+// localStorage is a hard ~5 MB per origin. Once it fills, every write fails —
+// including the offline queue's rescue copies of unsaved notes — and the app
+// would otherwise carry on looking like it was saving. This does not clear on
+// its own, so it gets a banner rather than a toast that scrolls away.
+let _storageBanner = null
+setStorageFullHandler(() => {
+    if (_storageBanner) return
+    _storageBanner = document.createElement('div')
+    _storageBanner.className = 'storage-full-banner'
+    _storageBanner.setAttribute('role', 'alert')
+    _storageBanner.textContent =
+        'This browser\u2019s local storage is full, so notes may not be saved. ' +
+        'Free up space for this site, then reload.'
+    const dismiss = document.createElement('button')
+    dismiss.type = 'button'
+    dismiss.setAttribute('aria-label', 'Dismiss')
+    dismiss.textContent = '\u00d7'
+    dismiss.addEventListener('click', () => {
+        _storageBanner.remove()
+        _storageBanner = null
+    })
+    _storageBanner.appendChild(dismiss)
+    document.body.appendChild(_storageBanner)
 })
 
 function init() {

@@ -108,6 +108,21 @@ button, input[type="button"], input[type="submit"] {
     --t-mode-toggle-border: var(--nc-red-dim);
     --t-mode-btn-active-bg: var(--nc-red);
     --t-mode-btn-active-color: var(--nc-bg-void);
+    /* Interaction surfaces are translucent overlays, so they have to be keyed
+       to the theme's polarity: white lifts a dark background, black darkens a
+       light one, and the wrong one composites into the background it sits on.
+       The -on-accent / -on-surface colours are the text partners for an accent
+       fill and for an accent painted as text: an accent picked to read as a
+       border or a fill is often well under 4.5:1 once it carries words. */
+    --t-hover-surface:  rgba(255, 255, 255, 0.05);
+    --t-active-surface: rgba(255, 255, 255, 0.08);
+    --t-drop-surface:   rgba(0, 245, 255, 0.18);
+    --t-on-accent:      var(--nc-bg-void);
+    --t-accent-on-surface: #ff3363;
+    --t-danger-on-surface: #ff0d46;
+    --t-accent2-on-surface: var(--t-accent2);
+    --t-link-hover:     #e6f7ff;
+
     --t-scanlines: 1;
     --t-noise: 1;
     --t-clip-input: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%);
@@ -185,6 +200,15 @@ button, input[type="button"], input[type="submit"] {
     --t-mode-toggle-border: #e0e0e0;
     --t-mode-btn-active-bg: #000000;
     --t-mode-btn-active-color: #ffffff;
+    --t-hover-surface:  rgba(0, 0, 0, 0.055);
+    --t-active-surface: rgba(0, 0, 0, 0.095);
+    --t-drop-surface:   rgba(51, 51, 51, 0.12);
+    --t-on-accent:      var(--nc-bg-void);
+    --t-accent-on-surface: var(--t-accent);
+    --t-danger-on-surface: var(--nc-red);
+    --t-accent2-on-surface: var(--t-accent2);
+    --t-link-hover:     #000000;
+
     --t-scanlines: 0;
     --t-noise: 0;
     --t-clip-input: none;
@@ -262,6 +286,15 @@ button, input[type="button"], input[type="submit"] {
     --t-mode-toggle-border: #2a2a2a;
     --t-mode-btn-active-bg: #ffffff;
     --t-mode-btn-active-color: #000000;
+    --t-hover-surface:  rgba(255, 255, 255, 0.05);
+    --t-active-surface: rgba(255, 255, 255, 0.08);
+    --t-drop-surface:   rgba(204, 204, 204, 0.18);
+    --t-on-accent:      var(--nc-bg-void);
+    --t-accent-on-surface: var(--t-accent);
+    --t-danger-on-surface: var(--nc-red);
+    --t-accent2-on-surface: var(--t-accent2);
+    --t-link-hover:     #ffffff;
+
     --t-scanlines: 0;
     --t-noise: 0;
     --t-clip-input: none;
@@ -339,6 +372,15 @@ button, input[type="button"], input[type="submit"] {
     --t-mode-toggle-border: #c9a98a;
     --t-mode-btn-active-bg: #5c4033;
     --t-mode-btn-active-color: #faf7f2;
+    --t-hover-surface:  rgba(0, 0, 0, 0.055);
+    --t-active-surface: rgba(0, 0, 0, 0.095);
+    --t-drop-surface:   rgba(92, 64, 51, 0.14);
+    --t-on-accent:      var(--nc-bg-void);
+    --t-accent-on-surface: var(--t-accent);
+    --t-danger-on-surface: var(--nc-red);
+    --t-accent2-on-surface: var(--t-accent2);
+    --t-link-hover:     #2b1d12;
+
     --t-scanlines: 0;
     --t-noise: 0;
     --t-clip-input: none;
@@ -416,6 +458,15 @@ button, input[type="button"], input[type="submit"] {
     --t-mode-toggle-border: #4c566a;
     --t-mode-btn-active-bg: #88c0d0;
     --t-mode-btn-active-color: #2e3440;
+    --t-hover-surface:  rgba(255, 255, 255, 0.05);
+    --t-active-surface: rgba(255, 255, 255, 0.08);
+    --t-drop-surface:   rgba(129, 161, 193, 0.18);
+    --t-on-accent:      var(--nc-bg-void);
+    --t-accent-on-surface: var(--t-accent);
+    --t-danger-on-surface: #92c5d4;
+    --t-accent2-on-surface: #a3c1de;
+    --t-link-hover:     #eceff4;
+
     --t-scanlines: 0;
     --t-noise: 0;
     --t-clip-input: none;
@@ -493,6 +544,15 @@ button, input[type="button"], input[type="submit"] {
     --t-mode-toggle-border: #44475a;
     --t-mode-btn-active-bg: #bd93f9;
     --t-mode-btn-active-color: #282a36;
+    --t-hover-surface:  rgba(255, 255, 255, 0.05);
+    --t-active-surface: rgba(255, 255, 255, 0.08);
+    --t-drop-surface:   rgba(139, 233, 253, 0.18);
+    --t-on-accent:      var(--nc-bg-void);
+    --t-accent-on-surface: var(--t-accent);
+    --t-danger-on-surface: var(--nc-red);
+    --t-accent2-on-surface: var(--t-accent2);
+    --t-link-hover:     #f8f8f2;
+
     --t-scanlines: 0;
     --t-noise: 0;
     --t-clip-input: none;
@@ -514,7 +574,10 @@ button, input[type="button"], input[type="submit"] {
     --nc-cyan-dim:    #d3cbb7;
     --nc-yellow:      #b58900;
     --nc-purple:      #6c71c4;
-    --nc-text:        #586e75;
+    /* Solarized's base01 body tone only reaches 4.4:1 on this theme's own card
+       colour, so it drops under AA as soon as a hover or active overlay sits
+       between it and the paper. A step darker keeps every surface above 4.5. */
+    --nc-text:        #475a60;
     --nc-text-dim:    #93a1a1;
     --nc-glow-red:    none;
     --nc-glow-cyan:   none;
@@ -540,11 +603,14 @@ button, input[type="button"], input[type="submit"] {
     --t-btn-color:      #268bd2;
     --t-btn-bg-hover:   #268bd2;
     --t-btn-text-hover: #fdf6e3;
+    /* Solarized's blue and teal are tuned to work as fills. Painted as text on
+       this theme's cream surfaces they land near 2.4-3.4:1, so the roles that
+       carry words use darkened variants while --t-accent keeps the fill hue. */
     --t-accent:         #268bd2;
-    --t-accent2:        #2aa198;
+    --t-accent2:        #15645c;
     --t-accent3:        #b58900;
     --t-label-color:    #93a1a1;
-    --t-breadcrumb-color: #268bd2;
+    --t-breadcrumb-color: #0d5a8a;
     --t-font-ui:        'Inter', 'Segoe UI', Arial, sans-serif;
     --t-font-heading:   'Inter', 'Segoe UI', Arial, sans-serif;
     --t-font-editor:    'Inter', 'Segoe UI', Arial, sans-serif;
@@ -557,7 +623,7 @@ button, input[type="button"], input[type="submit"] {
     --t-preview-code-border: #d3cbb7;
     --t-preview-pre-border: #d3cbb7;
     --t-preview-blockquote: #2aa198;
-    --t-preview-link:       #268bd2;
+    --t-preview-link:       #0d5a8a;
     --t-preview-marker-ul:  #cb4b16;
     --t-preview-marker-ol:  #2aa198;
     --t-preview-hr:         #d3cbb7;
@@ -568,8 +634,17 @@ button, input[type="button"], input[type="submit"] {
     --t-preview-bg:         rgba(0, 0, 0, 0.04);
     --t-divider-color:      #d3cbb7;
     --t-mode-toggle-border: #d3cbb7;
-    --t-mode-btn-active-bg: #268bd2;
+    --t-mode-btn-active-bg: #0d5a8a;
     --t-mode-btn-active-color: #fdf6e3;
+    --t-hover-surface:  rgba(0, 0, 0, 0.055);
+    --t-active-surface: rgba(0, 0, 0, 0.095);
+    --t-drop-surface:   rgba(21, 100, 92, 0.18);
+    --t-on-accent:      #000000;
+    --t-accent-on-surface: #0d5a8a;
+    --t-danger-on-surface: #1b6395;
+    --t-accent2-on-surface: var(--t-accent2);
+    --t-link-hover:     #0a4260;
+
     --t-scanlines: 0;
     --t-noise: 0;
     --t-clip-input: none;
@@ -621,7 +696,7 @@ button, input[type="button"], input[type="submit"] {
     --t-accent2:        #66d9ef;
     --t-accent3:        #a6e22e;
     --t-label-color:    #75715e;
-    --t-breadcrumb-color: #f92672;
+    --t-breadcrumb-color: #ff6e9f;
     --t-font-ui:        'Inter', 'Segoe UI', Arial, sans-serif;
     --t-font-heading:   'Inter', 'Segoe UI', Arial, sans-serif;
     --t-font-editor:    'Inter', 'Segoe UI', Arial, sans-serif;
@@ -645,8 +720,17 @@ button, input[type="button"], input[type="submit"] {
     --t-preview-bg:         rgba(0, 0, 0, 0.12);
     --t-divider-color:      #49483e;
     --t-mode-toggle-border: #49483e;
-    --t-mode-btn-active-bg: #f92672;
+    --t-mode-btn-active-bg: #ff6e9f;
     --t-mode-btn-active-color: #272822;
+    --t-hover-surface:  rgba(255, 255, 255, 0.05);
+    --t-active-surface: rgba(255, 255, 255, 0.08);
+    --t-drop-surface:   rgba(102, 217, 239, 0.18);
+    --t-on-accent:      #000000;
+    --t-accent-on-surface: #ff85ae;
+    --t-danger-on-surface: #fb76a6;
+    --t-accent2-on-surface: var(--t-accent2);
+    --t-link-hover:     #f8f8f2;
+
     --t-scanlines: 0;
     --t-noise: 0;
     --t-clip-input: none;
@@ -724,6 +808,15 @@ button, input[type="button"], input[type="submit"] {
     --t-mode-toggle-border: #2a3f58;
     --t-mode-btn-active-bg: #5e9ed6;
     --t-mode-btn-active-color: #1b2838;
+    --t-hover-surface:  rgba(255, 255, 255, 0.05);
+    --t-active-surface: rgba(255, 255, 255, 0.08);
+    --t-drop-surface:   rgba(78, 201, 176, 0.18);
+    --t-on-accent:      var(--nc-bg-void);
+    --t-accent-on-surface: #79b1e2;
+    --t-danger-on-surface: #6ca7da;
+    --t-accent2-on-surface: var(--t-accent2);
+    --t-link-hover:     #eaf2fb;
+
     --t-scanlines: 0;
     --t-noise: 0;
     --t-clip-input: none;
@@ -744,6 +837,7 @@ body {
     background-color: var(--t-body-bg, var(--nc-bg-void));
     color: var(--nc-text);
     min-height: 100vh;
+    min-height: 100dvh;
     overflow-x: hidden;
     background-image: var(--t-body-bg-image);
     background-size: var(--t-body-bg-size);
@@ -940,8 +1034,12 @@ body {
 }
 
 /* ── App Root ──────────────────────────────────────────────── */
+/* dvh tracks iOS Safari's shrinking viewport; vh resolves to the tall one with
+   the URL bar retracted, which pushes the bottom of the app under the toolbar.
+   The vh line stays first as the fallback for engines without dvh. */
 #app {
     min-height: 100vh;
+    min-height: 100dvh;
     position: relative;
 }
 
@@ -964,15 +1062,11 @@ body {
     font-size: 0.75rem;
     cursor: pointer;
     padding: 0;
-    transition: opacity 0.15s;
+    transition: color 0.15s;
 }
 
 [data-theme="cyberpunk"] .breadcrumb-link {
     text-shadow: var(--nc-glow-cyan);
-}
-
-.breadcrumb-link:hover {
-    opacity: 0.7;
 }
 
 /* ── Logo button (home) ──────────────────────────────────────── */
@@ -1124,15 +1218,21 @@ body {
     color: var(--nc-text-dim);
 }
 
+/* visibility, not opacity alone: a transparent row of buttons is still
+   hit-tested and still lands in the tab order, so it has to leave the tree
+   when it is hidden. */
 .folder-actions {
     display: flex;
     gap: 0.5rem;
     opacity: 0;
-    transition: opacity 0.2s;
+    visibility: hidden;
+    transition: opacity 0.2s, visibility 0.2s;
 }
 
-.folder-card:hover .folder-actions {
+.folder-card:hover .folder-actions,
+.folder-card:focus-within .folder-actions {
     opacity: 1;
+    visibility: visible;
 }
 
 /* ── File List ───────────────────────────────────────────────── */
@@ -1193,11 +1293,25 @@ body {
     display: flex;
     gap: 0.5rem;
     opacity: 0;
-    transition: opacity 0.2s;
+    visibility: hidden;
+    transition: opacity 0.2s, visibility 0.2s;
 }
 
-.file-card:hover .file-actions {
+.file-card:hover .file-actions,
+.file-card:focus-within .file-actions {
     opacity: 1;
+    visibility: visible;
+}
+
+/* Move, rename and delete live only in these rows, and a touch device has no
+   hover to reveal them with, so show them unconditionally there. */
+@media (hover: none) {
+    .folder-actions,
+    .file-actions {
+        opacity: 1;
+        visibility: visible;
+    }
+
 }
 
 /* ── Icon Button ─────────────────────────────────────────────── */
@@ -1285,7 +1399,7 @@ body {
 }
 
 .mode-btn:hover {
-    color: var(--t-accent, var(--nc-red));
+    color: var(--t-accent-on-surface, var(--t-accent));
     background: rgba(0, 0, 0, 0.08);
 }
 
@@ -1844,11 +1958,12 @@ body {
     text-shadow: var(--nc-glow-cyan);
     text-decoration: none;
     border-bottom: 1px solid var(--t-divider-color, var(--nc-cyan-dim));
-    transition: opacity 0.15s;
+    transition: color 0.15s, border-color 0.15s;
 }
 
 .editor-preview a:hover {
-    opacity: 0.7;
+    color: var(--t-link-hover, var(--nc-text));
+    border-bottom-color: var(--t-link-hover, var(--nc-text));
 }
 
 .editor-preview code {
@@ -1879,7 +1994,7 @@ body {
     border-left: 3px solid var(--t-preview-blockquote, var(--nc-red));
     padding-left: 1rem;
     margin: 1rem 0;
-    color: var(--nc-text-dim);
+    color: var(--nc-text);
 }
 
 .editor-preview ul,
@@ -1897,6 +2012,34 @@ body {
 .editor-preview li {
     margin: 0.2rem 0;
     line-height: 1.6;
+}
+
+/* ── Nesting guides ──────────────────────────────────────────
+   A vertical hairline down each nested list, so a sub-bullet visibly belongs
+   to the item above it instead of floating at an ambiguous indent. */
+.editor-preview li > ul,
+.editor-preview li > ol {
+    position: relative;
+}
+
+.editor-preview li > ul::before,
+.editor-preview li > ol::before {
+    content: "";
+    position: absolute;
+    left: 0.25rem;
+    top: 0.1em;
+    bottom: 0.1em;
+    width: 1px;
+    background: currentColor;
+    opacity: 0.16;
+    pointer-events: none;
+}
+
+/* A tight list item's paragraph shouldn't add block spacing inside the bullet.
+   Scoped to single-paragraph items: a loose list, and any item with more than
+   one paragraph, still needs its paragraph spacing. */
+.editor-preview li > p:only-child {
+    margin: 0;
 }
 
 .editor-preview ul li::marker {
@@ -1935,8 +2078,10 @@ body {
     border: 1px solid var(--t-preview-td-border, rgba(255, 0, 60, 0.15));
 }
 
+/* Darkening the cell is the row's only hover cue, and it vanishes against the
+   dark themes; mid-grey reads against either polarity. */
 .editor-preview tr:hover td {
-    background: rgba(0, 0, 0, 0.03);
+    background: rgba(128, 128, 128, 0.14);
 }
 
 /* ── Auth Panel ─────────────────────────────────────────────── */
@@ -1991,8 +2136,11 @@ body {
     transition: all 0.2s;
 }
 
+/* Any control that fills with a colour and prints text on top uses the
+   --t-mode-btn-active-bg / --t-mode-btn-active-color pair, which each theme
+   picks as a pair for contrast. --t-accent is only safe behind a border. */
 .auth-tab.active {
-    background: var(--t-accent, var(--nc-red));
+    background: var(--t-mode-btn-active-bg, var(--nc-red));
     color: var(--t-mode-btn-active-color, var(--nc-bg-void));
 }
 
@@ -2116,7 +2264,11 @@ body {
     opacity: 1;
 }
 
-.cyber-btn:hover .btn-text {
+/* --t-btn-text-hover is the theme's inverse text colour: it only works because
+   it lands on the accent-filled .btn-glow overlay. The Google button has no
+   glow layer and keeps Google's own white/grey face in every theme, so the
+   inverse colour there would paint theme text straight onto near-white. */
+.cyber-btn:not(.google-btn):hover .btn-text {
     position: relative;
     z-index: 1;
     color: var(--t-btn-text-hover, var(--nc-bg-void));
@@ -2188,11 +2340,12 @@ body {
     cursor: pointer;
     padding: 0;
     text-decoration: underline;
-    transition: opacity 0.15s;
+    transition: color 0.15s;
 }
 
 .link-btn:hover {
-    opacity: 0.7;
+    color: var(--t-link-hover, var(--nc-text));
+    text-decoration-thickness: 2px;
 }
 
 /* ── Auth Error ──────────────────────────────────────────────── */
@@ -2335,6 +2488,7 @@ body {
 /* ── App Shell ───────────────────────────────────────────────── */
 .app-shell {
     min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
     flex-direction: column;
     position: relative;
@@ -2511,8 +2665,8 @@ body {
 }
 
 .sidebar-new-btn:hover {
-    background: var(--t-accent, var(--nc-red));
-    color: var(--nc-bg-void);
+    background: var(--t-mode-btn-active-bg, var(--nc-red));
+    color: var(--t-mode-btn-active-color, var(--nc-bg-void));
 }
 
 .sidebar-list {
@@ -2538,21 +2692,23 @@ body {
 }
 
 .sidebar-folder:hover {
-    background: rgba(255,255,255,0.05);
-}
-
-.sidebar-folder.sidebar-drop-target {
-    outline: 2px solid var(--t-accent2, var(--nc-cyan));
-    outline-offset: -2px;
-    background: rgba(0, 245, 255, 0.10);
-    color: var(--t-accent2, var(--nc-cyan));
+    background: var(--t-hover-surface);
 }
 
 .sidebar-folder.active {
-    background: rgba(255,255,255,0.08);
-    color: var(--t-accent, var(--nc-red));
+    background: var(--t-active-surface);
+    color: var(--t-accent-on-surface, var(--t-accent));
     border-left: 3px solid var(--t-accent, var(--nc-red));
     padding-left: calc(1rem - 3px);
+}
+
+/* Must follow .active: equal specificity, and the folder you are dragging
+   onto is very often the one already open. */
+.sidebar-folder.sidebar-drop-target {
+    outline: 2px solid var(--t-accent2, var(--nc-cyan));
+    outline-offset: -2px;
+    background: var(--t-drop-surface);
+    color: var(--nc-text);
 }
 
 .sidebar-icon {
@@ -2572,14 +2728,13 @@ body {
     white-space: nowrap;
 }
 
+/* Size alone carries the de-emphasis: --nc-text-dim is the faintest tone in
+   every palette and at 0.7rem it never reached 4.5:1 on the sidebar, least of
+   all on the highlighted row. */
 .sidebar-count {
     font-size: 0.7rem;
-    color: var(--nc-text-dim);
+    color: var(--nc-text);
     flex-shrink: 0;
-}
-
-.sidebar-folder.active .sidebar-count {
-    color: var(--nc-text-dim);
 }
 
 .sidebar-empty {
@@ -2709,31 +2864,6 @@ body {
     letter-spacing: 0.05em;
 }
 
-/* ── Delete Button ───────────────────────────────────────────── */
-.delete-btn {
-    font-family: 'Share Tech Mono', monospace;
-    font-size: 0.7rem;
-    padding: 0.2rem 0.5rem;
-    background: transparent;
-    border: 1px solid transparent;
-    color: transparent;
-    cursor: pointer;
-    letter-spacing: 0.1em;
-    transition: color 0.2s, border-color 0.2s, background 0.2s;
-}
-
-.thought-card:hover .delete-btn {
-    color: var(--nc-text-dim);
-    border-color: var(--nc-text-dim);
-}
-
-.delete-btn:hover {
-    color: var(--nc-red) !important;
-    border-color: var(--nc-red) !important;
-    text-shadow: var(--nc-glow-red);
-    background: rgba(255, 0, 60, 0.1);
-}
-
 /* ── Empty / Loading / Error States ─────────────────────────── */
 .empty-state {
     text-align: center;
@@ -2853,7 +2983,11 @@ body {
         width: min(280px, 82vw);
         z-index: 999;
         transform: translateX(-100%);
-        transition: transform 0.3s ease;
+        /* A translated element is still rendered, so without visibility the
+           whole closed folder tree stays tabbable and readable to a screen
+           reader from off-screen. */
+        visibility: hidden;
+        transition: transform 0.3s ease, visibility 0.3s;
         overflow-y: auto;
         background: var(--t-header-bg, rgba(5, 5, 8, 0.97));
         border-right: 1px solid var(--t-header-border, var(--nc-red-dim));
@@ -2861,7 +2995,7 @@ body {
         padding-bottom: max(1rem, env(safe-area-inset-bottom));
         padding-left: env(safe-area-inset-left);
     }
-    .app-sidebar.open { transform: translateX(0); }
+    .app-sidebar.open { transform: translateX(0); visibility: visible; }
 
     .sidebar-scrim {
         display: block;
@@ -2922,8 +3056,10 @@ body {
         border-bottom: 1px solid var(--t-divider-color, var(--nc-red-dim));
     }
     .overflow-item:last-child { border-bottom: none; }
-    .overflow-item:hover { background: rgba(128, 128, 128, 0.1); color: var(--t-accent, var(--nc-red)); }
-    .overflow-logout { color: var(--t-accent, var(--nc-red)); }
+    /* The grey overlay alone marks the row: recolouring the label to the accent
+       drops it from --nc-text's 10-13:1 down to 2.7-4.3:1 on several themes. */
+    .overflow-item:hover { background: rgba(128, 128, 128, 0.1); }
+    .overflow-logout { color: var(--t-accent-on-surface, var(--t-accent)); }
 
     /* Stop iOS auto-zoom: every focusable text input >= 16px on mobile */
     .cyber-input,
@@ -3054,7 +3190,7 @@ body {
         font-family: var(--t-font-ui);
         font-size: 0.85rem;
     }
-    .menu-item:hover { background: rgba(128, 128, 128, 0.1); color: var(--t-accent, var(--nc-red)); }
+    .menu-item:hover { background: rgba(128, 128, 128, 0.1); }
     #save-btn { min-width: 72px; min-height: 44px; }
 
     /* Main content */
@@ -3142,11 +3278,6 @@ body {
     /* Thought input — smaller gap */
     .input-zone {
         padding: 1rem;
-    }
-
-    /* Thought cards */
-    .thought-card {
-        padding: 1rem 1rem 1rem 1.25rem;
     }
 
     /* Breadcrumb — wrap gracefully */
@@ -3326,22 +3457,25 @@ body {
 
 .modal-btn.modal-confirm {
     border-color: var(--t-accent);
-    color: var(--t-accent);
+    color: var(--t-accent-on-surface, var(--t-accent));
 }
 
+/* The card colour is one step lighter than the void, so borrowing it as the
+   on-accent label costs contrast; --t-on-accent is chosen per theme against
+   that theme's accent fill instead. */
 .modal-btn.modal-confirm:hover {
     background: var(--t-accent);
-    color: var(--nc-bg-dark);
+    color: var(--t-on-accent, var(--nc-bg-void));
 }
 
 .modal-btn.modal-confirm.danger {
     border-color: var(--nc-red);
-    color: var(--nc-red);
+    color: var(--t-danger-on-surface, var(--nc-red));
 }
 
 .modal-btn.modal-confirm.danger:hover {
     background: var(--nc-red);
-    color: var(--nc-bg-dark);
+    color: var(--t-on-accent, var(--nc-bg-void));
 }
 
 /* ── Subfolder cards (in files view) ─────────────────────── */
@@ -3364,11 +3498,16 @@ body {
     padding: 0;
     text-decoration: underline;
     text-underline-offset: 3px;
-    transition: opacity 0.15s;
+    transition: color 0.15s;
 }
 
+/* Fading a link with opacity composites it toward its own background, so the
+   hover state can only ever be harder to read than the resting one. Every link
+   hover here moves to --t-link-hover, the theme's highest-contrast link tone,
+   and thickens its rule so the monochrome themes still show a change. */
 .breadcrumb-link:hover {
-    opacity: 0.75;
+    color: var(--t-link-hover, var(--nc-text));
+    text-decoration-thickness: 2px;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -3411,7 +3550,7 @@ body {
 }
 
 .sidebar-toggle:hover {
-    background: rgba(0,0,0,0.08);
+    background: rgba(128, 128, 128, 0.14);
 }
 
 /* .md file dots in sidebar */
@@ -3435,7 +3574,7 @@ body {
 }
 
 .sidebar-file-dot:hover {
-    background: rgba(255,255,255,0.05);
+    background: var(--t-hover-surface);
     color: var(--nc-text);
 }
 
@@ -3590,10 +3729,14 @@ body {
     vertical-align: top;
 }
 
-/* Task list: remove bullet, no extra left padding */
-.editor-preview ul:has(li > input[type="checkbox"]) {
+/* Task list: remove the bullet from the task items themselves. Hiding the
+   marker on the whole <ul> stripped the bullets off ordinary items in a mixed
+   list, so scope it to the items that actually carry a checkbox. */
+.editor-preview li:has(> input[type="checkbox"]) {
     list-style: none;
-    padding-left: 0.25rem;
+}
+.editor-preview ul:has(> li > input[type="checkbox"]) {
+    padding-left: 1rem;
 }
 
 /* Each task item is a flex row so text wraps cleanly */
@@ -3607,21 +3750,23 @@ body {
 
 /* The text content after the checkbox fills remaining space and wraps */
 .editor-preview li:has(> input[type="checkbox"]) > p,
-.editor-preview li:has(> input[type="checkbox"]) > span {
+.editor-preview li:has(> input[type="checkbox"]) > span,
+.editor-preview li:has(> input[type="checkbox"]) > .task-text,
+.editor-preview li:has(> p > input[type="checkbox"]) > p > .task-text {
     flex: 1;
     min-width: 0;
     word-break: break-word;
 }
 
-/* Checked task items get a subtle strikethrough */
-.editor-preview li:has(> input[type="checkbox"]:checked) {
-    opacity: 0.65;
+/* Checked task items get a subtle strikethrough, on the item's OWN text only.
+   No opacity, and not on the <li>: both are inherited by the whole subtree, and
+   marked nests a sub-list inside its parent <li>, so either one struck through
+   or faded every still-open child with it — and a descendant can cancel
+   neither. The renderer wraps each item's text in .task-text for this. */
+.editor-preview li:has(> input[type="checkbox"]:checked) > .task-text,
+.editor-preview li:has(> p > input[type="checkbox"]:checked) .task-text {
     text-decoration: line-through;
     text-decoration-color: var(--nc-text-dim);
-}
-.editor-preview li:has(> input[type="checkbox"]:checked) input[type="checkbox"] {
-    text-decoration: none;
-    opacity: 1;
 }
 
 /* nested lists break onto a new line, indented past the checkbox */
@@ -3641,16 +3786,24 @@ body {
     margin: 0.15rem 0;
 }
 
-.editor-preview ul ul li::marker {
+/* `ul ul li` also matches level 3, 4, ... so the level-2 glyph won every
+   deeper level too. Scope each depth to its own list with `>`. */
+.editor-preview ul ul > li::marker {
     content: "◦ ";
     color: var(--t-preview-marker-ul, var(--nc-red));
     opacity: 0.75;
 }
 
-.editor-preview ul ul ul li::marker {
+.editor-preview ul ul ul > li::marker {
     content: "▪ ";
     color: var(--t-preview-marker-ul, var(--nc-red));
     opacity: 0.55;
+}
+
+.editor-preview ul ul ul ul > li::marker {
+    content: "‣ ";
+    color: var(--t-preview-marker-ul, var(--nc-red));
+    opacity: 0.45;
 }
 
 /* ── Link toolbar (floating) ─────────────────────────────────── */
@@ -3680,8 +3833,8 @@ body {
 }
 
 .link-toolbar-btn:hover {
-    background: var(--t-accent, var(--nc-red));
-    color: var(--nc-bg-void, #050508);
+    background: var(--t-mode-btn-active-bg, var(--nc-red));
+    color: var(--t-mode-btn-active-color, var(--nc-bg-void));
 }
 
 /* ── Theme picker: mobile improvements ───────────────────────── */
@@ -3703,7 +3856,7 @@ body {
 
 /* ── Sidebar file dot: active state when file is open ─────────── */
 .sidebar-file-dot.active {
-    background: rgba(255,255,255,0.08);
+    background: var(--t-active-surface);
     color: var(--nc-text);
     border-left: 3px solid var(--t-accent2, var(--nc-cyan));
     padding-left: calc(0.75rem - 3px);
@@ -3772,7 +3925,7 @@ body {
 .subfolder-card.drag-target-over {
     outline: 2px solid var(--t-accent2, var(--nc-cyan));
     outline-offset: -2px;
-    background: rgba(0, 245, 255, 0.06);
+    background: var(--t-drop-surface);
 }
 
 /* Drop zone indicator between cards */
@@ -3865,9 +4018,11 @@ body {
     width: 100%;
 }
 
+/* Mid-grey is the one overlay that composites visibly on both light and dark
+   surfaces, and the destination name stays at --nc-text: this is the list you
+   read to confirm where a note is about to go. */
 .move-menu-item:hover {
-    background: rgba(0,0,0,0.06);
-    color: var(--t-accent2, var(--nc-cyan));
+    background: rgba(128, 128, 128, 0.18);
 }
 
 .move-menu-item .move-menu-depth {
@@ -3894,7 +4049,7 @@ body {
 .move-item-btn {
     background: transparent;
     border: 1px solid transparent;
-    color: var(--nc-text-dim);
+    color: var(--nc-text);
     font-size: 0.75rem;
     padding: 0.2rem 0.45rem;
     cursor: pointer;
@@ -3910,10 +4065,18 @@ body {
     opacity: 1;
 }
 
+/* Same specificity as the `opacity: 0` above, so this has to sit after it —
+   a touch device has no hover to reveal the button with. */
+@media (hover: none) {
+    .move-item-btn {
+        opacity: 1;
+    }
+}
+
 .move-item-btn:hover {
-    color: var(--t-accent2, var(--nc-cyan));
+    color: var(--t-accent2-on-surface, var(--t-accent2));
     border-color: var(--t-accent2, var(--nc-cyan));
-    background: rgba(0, 245, 255, 0.08);
+    background: rgba(128, 128, 128, 0.18);
 }
 
 /* ── Mobile theme picker: better layout ──────────────────────── */
@@ -4097,9 +4260,14 @@ body {
     color: var(--t-mode-btn-active-color, var(--nc-bg-void));
 }
 
+/* The chip's grey fill and a 0.7 fade both push the hint toward the accent
+   behind it, on the one row the user is aiming at. Let the row's own inverted
+   colour carry the hint instead. */
 .command-palette-item.selected .command-key {
     color: inherit;
-    opacity: 0.7;
+    opacity: 1;
+    background: transparent;
+    border-color: currentColor;
 }
 
 .command-name {
@@ -4151,19 +4319,21 @@ body {
     cursor: pointer;
     text-decoration: none;
     border-bottom: 1px dashed var(--t-accent2, var(--nc-cyan));
-    transition: opacity 0.15s;
+    transition: color 0.15s, border-color 0.15s;
     font-weight: 500;
 }
 
 .wikilink:hover {
-    opacity: 0.7;
+    color: var(--t-link-hover, var(--nc-text));
+    border-bottom-style: solid;
+    border-bottom-color: var(--t-link-hover, var(--nc-text));
 }
 
 /* ── Tags ───────────────────────────────────────────────────── */
 .tag-pill {
     display: inline-block;
     background: rgba(128, 128, 128, 0.1);
-    color: var(--t-accent2, var(--nc-cyan));
+    color: var(--t-accent2-on-surface, var(--t-accent2));
     padding: 0.05em 0.45em;
     border-radius: 10px;
     font-size: 0.85em;
@@ -4175,7 +4345,7 @@ body {
 }
 
 .tag-pill:hover {
-    background: rgba(128, 128, 128, 0.2);
+    background: var(--t-hover-surface, rgba(128, 128, 128, 0.12));
     border-color: var(--t-accent2, var(--nc-cyan));
 }
 
@@ -4905,9 +5075,9 @@ body {
 }
 
 .sidebar-settings-btn:hover {
-    color: var(--t-accent, var(--nc-red));
+    color: var(--t-accent-on-surface, var(--t-accent));
     border-color: var(--t-accent, var(--nc-red));
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--t-hover-surface);
 }
 
 .sidebar-settings-icon {
@@ -5231,4 +5401,136 @@ body {
     .editor-footer { display: none; }
     .editor-zone.keyboard-open .editor-toolbar { display: none; }
     .format-toolbar.fmt-expanded { max-height: 104px; }
+}
+
+/* Shown only when localStorage refuses writes — the state does not clear by
+   itself, so it stays put rather than fading like a toast. */
+.storage-full-banner {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 0;
+    z-index: 10000;
+    padding: 0.55rem 2.5rem 0.55rem 1rem;
+    text-align: center;
+    font-family: var(--t-font-ui);
+    font-size: 0.85rem;
+    background: var(--t-accent, var(--nc-red));
+    color: var(--t-on-accent, var(--nc-bg-void));
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+}
+
+.storage-full-banner button {
+    position: absolute;
+    top: 50%;
+    right: 0.5rem;
+    transform: translateY(-50%);
+    min-width: 32px;
+    min-height: 32px;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+/* ── Recycle bin ─────────────────────────────────────────────── */
+.trash-note {
+    margin: 0 0 1rem;
+    font-family: var(--t-font-ui);
+    font-size: 0.8rem;
+    color: var(--nc-text);
+    opacity: 0.75;
+}
+
+.trash-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.trash-card {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.85rem 1rem;
+    background: var(--t-card-bg);
+    border: 1px solid var(--t-card-border);
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.trash-card:hover {
+    border-color: var(--t-card-hover-border);
+    background: var(--t-hover-surface, rgba(128, 128, 128, 0.08));
+}
+
+.trash-card-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.trash-title {
+    font-family: var(--t-font-ui);
+    font-size: 0.95rem;
+    color: var(--nc-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.trash-meta {
+    margin-top: 0.2rem;
+    font-family: var(--t-font-ui);
+    font-size: 0.72rem;
+    color: var(--nc-text);
+    opacity: 0.7;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.trash-sep { opacity: 0.5; }
+
+.trash-actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-shrink: 0;
+}
+
+/* Unlike the row actions on a folder card these are always visible: the bin is
+   a place you come to act, and there is no hover on touch. */
+.trash-restore-btn,
+.trash-purge-btn {
+    opacity: 1;
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    min-height: 32px;
+}
+
+.trash-restore-btn:hover {
+    color: var(--t-accent2-on-surface, var(--t-accent2));
+    border-color: var(--t-accent2, var(--nc-cyan));
+    background: var(--t-hover-surface, rgba(128, 128, 128, 0.12));
+}
+
+.trash-purge-btn:hover {
+    color: var(--t-danger-on-surface, var(--nc-red));
+    border-color: var(--t-danger-on-surface, var(--nc-red));
+    background: var(--t-hover-surface, rgba(128, 128, 128, 0.12));
+}
+
+.cyber-btn.danger .btn-text { color: var(--t-danger-on-surface, var(--nc-red)); }
+.cyber-btn.danger:hover:not(:disabled) .btn-text { color: var(--t-on-accent, var(--nc-bg-void)); }
+.cyber-btn.danger:hover:not(:disabled) .btn-glow { background: var(--nc-red); }
+
+@media (max-width: 600px) {
+    .trash-card {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.6rem;
+    }
+    .trash-actions { width: 100%; }
+    .trash-restore-btn,
+    .trash-purge-btn { flex: 1; }
 }

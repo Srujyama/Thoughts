@@ -14,9 +14,12 @@ const DB_NAME = 'nc_vault'
 const DB_VERSION = 1
 const STORE = 'contents'
 
-// Don't let one enormous note evict the whole working set, and don't hold more
-// than this in memory after a warm().
-const MAX_ENTRY_BYTES = 512 * 1024
+// Don't hold more than this in memory after a warm(). There is deliberately no
+// per-entry ceiling: `getSync` is what every reader gates on, so an entry this
+// Map refuses is written to IndexedDB and then unreachable — the vault's
+// biggest notes were re-fetched on every sync and folder visit, and counted for
+// nothing in backlinks, the graph or tag search. The LRU below is what keeps a
+// large note from holding the working set hostage.
 const MAX_MEMORY_BYTES = 12 * 1024 * 1024
 
 let _dbPromise = null
@@ -44,10 +47,6 @@ function _key(path) { return `${_uid || 'anon'}/${path}` }
 
 function _remember(key, entry) {
     const size = (entry.content || '').length
-    // Too big to hold in memory: make sure we don't leave an older copy behind
-    // that getSync would serve in preference to what IndexedDB now holds.
-    if (size > MAX_ENTRY_BYTES) { _forget(key); return }
-
     const prev = _mem.get(key)
     const prevSize = prev ? (prev.content || '').length : 0
     if (_memBytes - prevSize + size > MAX_MEMORY_BYTES) {

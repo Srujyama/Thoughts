@@ -43,3 +43,6 @@ backend/venv/
 supabase/.branches
 supabase/.temp
 .vercel
+
+# Recovered vault notes (contains personal note content — never commit)
+vault-rescue/
